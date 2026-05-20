@@ -287,19 +287,37 @@ export default function App() {
 
   const speak = (text: string) => {
     if (!text) return;
-    
-    // Stop any current speech
     window.speechSynthesis.cancel();
-    
+
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'fr-FR';
-    utterance.rate = 0.9; // Slightly slower for better clarity
-    
+    utterance.rate = 0.85;
+
+    // Pick best French voice: prefer Google/Microsoft online voices
+    const voices = window.speechSynthesis.getVoices();
+    const frVoices = voices.filter(v => v.lang.startsWith('fr'));
+    const preferred = frVoices.find(v => /google|microsoft|thomas|amelie|alain|claire/i.test(v.name))
+      || frVoices.find(v => v.localService === false) // online voice = better quality
+      || frVoices[0];
+    if (preferred) utterance.voice = preferred;
+
     utterance.onstart = () => setIsSpeaking(true);
     utterance.onend = () => setIsSpeaking(false);
     utterance.onerror = () => setIsSpeaking(false);
-    
-    window.speechSynthesis.speak(utterance);
+
+    // Voices may load async on first call
+    if (voices.length === 0) {
+      window.speechSynthesis.onvoiceschanged = () => {
+        const v2 = window.speechSynthesis.getVoices();
+        const fr2 = v2.filter(v => v.lang.startsWith('fr'));
+        const best = fr2.find(v => /google|microsoft|thomas|amelie|alain|claire/i.test(v.name))
+          || fr2.find(v => v.localService === false) || fr2[0];
+        if (best) utterance.voice = best;
+        window.speechSynthesis.speak(utterance);
+      };
+    } else {
+      window.speechSynthesis.speak(utterance);
+    }
   };
   const [error, setError] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
