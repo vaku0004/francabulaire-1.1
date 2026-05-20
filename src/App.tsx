@@ -824,7 +824,8 @@ export default function App() {
         contents: `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
         If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
 
-        Output ONLY a raw JSON object, no markdown, no extra text:
+        If the word has a typo or is misspelled, set found:false and put 2-3 correct spelling suggestions in "suggestions".
+        If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
         {"frenchWord":"...","translation":"ONE short word in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[]}`,
         config: {}
       });
