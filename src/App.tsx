@@ -145,7 +145,7 @@ export default function App() {
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+        model: "gemma-4-26b-a4b-it",
         contents: `Tu es un professeur de français. Crée une petite histoire cohérente et intéressante en français utilisant EXACTEMENT ces mots : ${wordListStr}.
         L'histoire doit être d'un niveau intermédiaire (B1).
         
@@ -209,7 +209,7 @@ export default function App() {
         const wordList = batch.map(w => w.word).join(', ');
 
         const response = await ai.models.generateContent({
-          model: "gemini-3.1-flash-lite",
+          model: "gemma-4-26b-a4b-it",
           contents: `Translate these French words/expressions to ${langObj.aiName}: ${wordList}.
           
           Guidelines:
@@ -803,7 +803,7 @@ export default function App() {
       const ai = new GoogleGenAI({ apiKey });
       console.log('[DEBUG] Sending request to Gemini...');
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+        model: "gemma-4-26b-a4b-it",
         contents: `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
         If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
 
@@ -1021,7 +1021,7 @@ export default function App() {
 
       const ai = new GoogleGenAI({ apiKey });
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+        model: "gemma-4-26b-a4b-it",
         contents: `Extract French vocabulary from the following text: ${text.substring(0, 5000)}.
         Identify word, translation in ${targetLanguage}, gender (m/f/none), isPlural, infinitive, and examples.
         Respond ONLY with a JSON array of objects. No reasoning allowed.`,
