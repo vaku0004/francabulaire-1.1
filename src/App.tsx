@@ -51,6 +51,32 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLi
 const STORAGE_KEY = 'mon_francais_vocab';
 const REVIEW_INTERVALS = [1, 3, 7, 14, 30]; // Spaced repetition intervals in days
 
+const FALLBACK_MODELS = [
+  "gemini-3.1-flash-lite",
+  "gemma-4-26b-a4b-it",
+  "gemini-2.5-flash-lite",
+  "gemini-3-flash-preview",
+  "gemini-2.5-flash",
+];
+
+async function generateWithFallback(ai: any, params: any): Promise<any> {
+  let lastError: any;
+  for (const model of FALLBACK_MODELS) {
+    try {
+      const response = await ai.models.generateContent({ ...params, model });
+      return response;
+    } catch (err: any) {
+      const code = (() => { try { return JSON.parse(err.message)?.error?.code; } catch { return null; } })();
+      if (code === 429 || code === 503 || code === 500) {
+        lastError = err;
+        continue; // try next model
+      }
+      throw err; // other errors — stop immediately
+    }
+  }
+  throw lastError;
+}
+
 function extractJson(response: any): string {
   const parts = response?.candidates?.[0]?.content?.parts;
   let text = '';
@@ -151,8 +177,7 @@ export default function App() {
       
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+      const response = await generateWithFallback(ai, {
         contents: `Tu es un professeur de français. Crée une petite histoire cohérente et intéressante en français utilisant EXACTEMENT ces mots : ${wordListStr}.
         L'histoire doit être d'un niveau intermédiaire (B1).
         
@@ -203,8 +228,7 @@ export default function App() {
         const batch = wordsToTranslate.slice(i, i + batchSize);
         const wordList = batch.map(w => w.word).join(', ');
 
-        const response = await ai.models.generateContent({
-          model: "gemini-3.1-flash-lite",
+        const response = await generateWithFallback(ai, {
           contents: `Translate these French words/expressions to ${langObj.aiName}: ${wordList}.
           
           Guidelines:
@@ -796,8 +820,7 @@ export default function App() {
 
       const ai = new GoogleGenAI({ apiKey });
       console.log('[DEBUG] Sending request to Gemini...');
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+      const response = await generateWithFallback(ai, {
         contents: `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
         If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
 
@@ -986,8 +1009,7 @@ export default function App() {
       }
 
       const ai = new GoogleGenAI({ apiKey });
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-flash-lite",
+      const response = await generateWithFallback(ai, {
         contents: `Extract French vocabulary from the following text: ${text.substring(0, 5000)}.
         Identify word, translation in ${targetLanguage}, gender (m/f/none), isPlural, infinitive, and examples.
         Respond ONLY with a JSON array of objects. No reasoning allowed.`,
