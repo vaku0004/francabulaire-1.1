@@ -804,24 +804,20 @@ export default function App() {
       console.log('[DEBUG] Sending request to Gemini...');
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash-lite",
-        contents: `Identify the language of the word or phrase "${trimmedQuery}". 
-        If it's French, translate it to ${currentLangObj.aiName}. 
-        If it's already in ${currentLangObj.aiName}, translate it to French.
-        
-        Regardless of input language, you MUST return a JSON object with these exact fields:
-        1. "frenchWord": the correct French version of the word (include articles like 'le', 'la', 'l' for nouns).
-        2. "translation": the translation in ${currentLangObj.aiName}.
-        3. "gender": (m/f/none) only for French nouns.
-        4. "isPlural": (boolean).
-        5. "infinitive": French infinitive form if it's a verb.
-        6. "infinitiveTranslation": translation of that infinitive in ${currentLangObj.aiName}.
-        7. "example": one short example sentence in French.
-        8. "exampleTranslation": translation of that example in ${currentLangObj.aiName}.
-        9. "found": (boolean) true if a valid translation was found.
-        10. "suggestions": array of related words if not found.
-        
-        CRITICAL: Use ${currentLangObj.aiName} for all translation fields. Do not use Russian unless ${currentLangObj.aiName} is Russian. 
-        Respond ONLY with a JSON object.`,
+        contents: `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
+        If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
+
+        Return ONLY a compact JSON object with these fields (no explanations, no alternatives, just the best single translation):
+        - "frenchWord": French word with article if noun (e.g. "le chat")
+        - "translation": ONE short translation in ${currentLangObj.aiName}, max 3 words
+        - "gender": "m", "f", or "none"
+        - "isPlural": boolean
+        - "infinitive": French infinitive if verb, else ""
+        - "infinitiveTranslation": translation of infinitive in ${currentLangObj.aiName}, else ""
+        - "example": one short French sentence (max 10 words)
+        - "exampleTranslation": translation of example in ${currentLangObj.aiName}
+        - "found": true if valid word found
+        - "suggestions": [] or array of related French words if not found`,
         config: {
           thinkingConfig: { thinkingBudget: 0 },
           responseMimeType: "application/json",
