@@ -53,11 +53,18 @@ const REVIEW_INTERVALS = [1, 3, 7, 14, 30]; // Spaced repetition intervals in da
 
 function extractJson(response: any): string {
   const parts = response?.candidates?.[0]?.content?.parts;
+  let text = '';
   if (parts) {
-    const text = parts.filter((p: any) => !p.thought).map((p: any) => p.text || '').join('');
-    if (text) return text;
+    text = parts.filter((p: any) => !p.thought).map((p: any) => p.text || '').join('');
   }
-  return response?.text || '';
+  if (!text) text = response?.text || '';
+  // Strip markdown code blocks
+  const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (match) return match[1].trim();
+  // Extract first JSON object or array
+  const jsonMatch = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+  if (jsonMatch) return jsonMatch[1];
+  return text;
 }
 
 export default function App() {
@@ -155,18 +162,7 @@ export default function App() {
         3. "gaps": la liste ordonnée des mots correspondant aux marqueurs {{0}}, {{1}}, etc.
         
         Exemple : "Le {{0}} est bleu." avec gaps: ["ciel"].`,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              story: { type: Type.STRING },
-              gaps: { type: Type.ARRAY, items: { type: Type.STRING } }
-            },
-            required: ["title", "story", "gaps"]
-          }
-        }
+        config: {}
       });
 
       const result = JSON.parse(extractJson(response) || '{}');
@@ -805,36 +801,9 @@ export default function App() {
         contents: `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
         If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
 
-        Return ONLY a compact JSON object with these fields (no explanations, no alternatives, just the best single translation):
-        - "frenchWord": French word with article if noun (e.g. "le chat")
-        - "translation": ONE short translation in ${currentLangObj.aiName}, max 3 words
-        - "gender": "m", "f", or "none"
-        - "isPlural": boolean
-        - "infinitive": French infinitive if verb, else ""
-        - "infinitiveTranslation": translation of infinitive in ${currentLangObj.aiName}, else ""
-        - "example": one short French sentence (max 10 words)
-        - "exampleTranslation": translation of example in ${currentLangObj.aiName}
-        - "found": true if valid word found
-        - "suggestions": [] or array of related French words if not found`,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              found: { type: Type.BOOLEAN },
-              frenchWord: { type: Type.STRING },
-              translation: { type: Type.STRING },
-              gender: { type: Type.STRING },
-              isPlural: { type: Type.BOOLEAN },
-              infinitive: { type: Type.STRING },
-              infinitiveTranslation: { type: Type.STRING },
-              example: { type: Type.STRING },
-              exampleTranslation: { type: Type.STRING },
-              suggestions: { type: Type.ARRAY, items: { type: Type.STRING } }
-            },
-            required: ["found"]
-          }
-        }
+        Output ONLY a raw JSON object, no markdown, no extra text:
+        {"frenchWord":"...","translation":"ONE short word in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[]}`,
+        config: {}
       });
 
       const parts = response?.candidates?.[0]?.content?.parts;
@@ -1022,26 +991,7 @@ export default function App() {
         contents: `Extract French vocabulary from the following text: ${text.substring(0, 5000)}.
         Identify word, translation in ${targetLanguage}, gender (m/f/none), isPlural, infinitive, and examples.
         Respond ONLY with a JSON array of objects. No reasoning allowed.`,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                word: { type: Type.STRING },
-                translation: { type: Type.STRING },
-                gender: { type: Type.STRING },
-                isPlural: { type: Type.BOOLEAN },
-                infinitive: { type: Type.STRING },
-                infinitiveTranslation: { type: Type.STRING },
-                example: { type: Type.STRING },
-                exampleTranslation: { type: Type.STRING }
-              },
-              required: ["word", "translation"]
-            }
-          }
-        }
+        config: {}
       });
 
       const result = JSON.parse(extractJson(response) || '[]');
