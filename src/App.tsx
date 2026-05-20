@@ -156,7 +156,6 @@ export default function App() {
         
         Exemple : "Le {{0}} est bleu." avec gaps: ["ciel"].`,
         config: {
-          thinkingConfig: { thinkingBudget: 0 },
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -217,8 +216,7 @@ export default function App() {
           2. Use accurate, context-aware translations.
           3. Do not include articles in translations unless necessary for grammar in ${langObj.aiName}.`,
           config: {
-            thinkingConfig: { thinkingBudget: 0 },
-            responseMimeType: "application/json",
+              responseMimeType: "application/json",
           }
         });
 
@@ -819,7 +817,6 @@ export default function App() {
         - "found": true if valid word found
         - "suggestions": [] or array of related French words if not found`,
         config: {
-          thinkingConfig: { thinkingBudget: 0 },
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -1026,7 +1023,6 @@ export default function App() {
         Identify word, translation in ${targetLanguage}, gender (m/f/none), isPlural, infinitive, and examples.
         Respond ONLY with a JSON array of objects. No reasoning allowed.`,
         config: {
-          thinkingConfig: { thinkingBudget: 0 },
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.ARRAY,
