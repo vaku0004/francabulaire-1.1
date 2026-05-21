@@ -930,7 +930,6 @@ export default function App() {
     // Longer debounce for phrases (multiple words)
     const isPhrase = searchQuery.trim().includes(' ');
     const delay = isPhrase ? 2000 : 1200;
-    lastFetchedQuery.current = ''; // reset so re-typed query always fires
     const timer = setTimeout(() => {
       fetchTranslation(searchQuery);
     }, delay);
