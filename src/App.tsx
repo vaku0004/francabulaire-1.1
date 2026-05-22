@@ -844,7 +844,7 @@ export default function App() {
 
         If the word has a typo or is misspelled, set found:false and put 2-3 correct spelling suggestions in "suggestions".
         If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
-        {"frenchWord":"...","translation":"ONE short word in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[]}`,
+        {"frenchWord":"...","translation":"accurate short translation in ${currentLangObj.aiName}, 1-4 words","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[]}`,
         config: {}
       });
 
