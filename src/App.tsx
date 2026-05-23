@@ -1667,50 +1667,46 @@ export default function App() {
                     exit={{ opacity: 0, y: -5 }}
                     className="p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100 space-y-3"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-widest leading-none mb-1">Français</p>
-                        <div className="flex items-center gap-1.5 sm:gap-3 overflow-hidden">
-                          <h4 className="text-xl sm:text-2xl font-bold text-slate-900 truncate shrink min-w-0">
-                            {getWordWithArticle(searchResult.word, searchResult.gender, searchResult.isPlural)}
-                          </h4>
-                          <button 
-                            onClick={() => speak(searchResult.word)}
-                            className="p-1 px-1.5 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition-colors shrink-0"
-                            title="Écouter"
-                          >
-                            <Volume2 size={16} />
-                          </button>
-                          {searchResult.gender && searchResult.gender !== 'none' && (
-                            <span className={`px-1 py-0.5 rounded text-[8px] sm:text-[9px] font-bold uppercase shrink-0 ${
-                              searchResult.gender === 'm' ? 'bg-blue-100 text-blue-600' : 'bg-pink-100 text-pink-600'
-                            }`}>
-                              {searchResult.gender === 'm' ? 'm' : 'f'}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-0.5 sm:gap-1 shrink-0">
-                        <button 
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-widest leading-none">Français</p>
+                      <h4 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
+                        {getWordWithArticle(searchResult.word, searchResult.gender, searchResult.isPlural)}
+                      </h4>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          onClick={() => speak(searchResult.word)}
+                          className="p-1 px-1.5 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition-colors"
+                          title="Écouter"
+                        >
+                          <Volume2 size={16} />
+                        </button>
+                        {searchResult.gender && searchResult.gender !== 'none' && (
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
+                            searchResult.gender === 'm' ? 'bg-blue-100 text-blue-600' : 'bg-pink-100 text-pink-600'
+                          }`}>
+                            {searchResult.gender === 'm' ? 'm' : 'f'}
+                          </span>
+                        )}
+                        <button
                           onClick={() => {
                             setWordListSearchQuery(searchResult.word);
                             setIsWordListModalOpen(true);
                           }}
-                          className="px-1.5 py-1 bg-white border border-indigo-100 rounded-lg text-[9px] font-bold text-indigo-600 uppercase hover:bg-indigo-50 transition-colors whitespace-nowrap"
+                          className="px-1.5 py-1 bg-white border border-indigo-100 rounded-lg text-[9px] font-bold text-indigo-600 uppercase hover:bg-indigo-50 transition-colors"
                         >
                           En base
                         </button>
-                        <button 
+                        <button
                           onClick={() => setEditingWord(searchResult)}
-                          className="p-1.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-all border border-transparent hover:border-indigo-100"
+                          className="p-1.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-all"
                           title="Modifier"
                         >
                           <Edit2 size={16} />
                         </button>
-                        <button 
+                        <button
                           onClick={(e) => handleDeleteWord(searchResult.id, e)}
-                          className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all border border-transparent hover:border-red-100"
-                          title="Supprimer du dictionnaire"
+                          className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                          title="Supprimer"
                         >
                           <Trash2 size={16} />
                         </button>
