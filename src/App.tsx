@@ -814,10 +814,10 @@ export default function App() {
   const fetchTranslation = useCallback(async (query: string) => {
     const trimmedQuery = query.trim().toLowerCase();
     const normalizedQuery = normalizeWord(trimmedQuery);
-    
+
     if (!trimmedQuery || trimmedQuery.length < 2) return;
     if (lastFetchedQuery.current === trimmedQuery) return;
-    
+
     lastFetchedQuery.current = trimmedQuery;
     setIsSearching(true);
     setError(null);
@@ -831,26 +831,29 @@ export default function App() {
     try {
       // Robust API key detection in frontend
       const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
-      console.log('[DEBUG] apiKey exists:', !!apiKey, 'value:', apiKey?.slice(0, 10));
       if (!apiKey) {
         throw new Error("Clé API не найдена. Пожалуйста, проверьте настройки (Secrets) в AI Studio.");
       }
 
-      const ai = new GoogleGenAI({ apiKey });
-      console.log('[DEBUG] Sending request to Gemini...');
-      const response = await generateWithFallback(ai, {
-        contents: `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
-        If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
+      // Detect script: Cyrillic → user is typing in their native language → translate TO French
+      const hasCyrillic = /[Ѐ-ӿ]/.test(query.trim());
+      const prompt = hasCyrillic
+        ? `The user typed "${query.trim()}" in ${currentLangObj.aiName} (Cyrillic script).
+Translate this ${currentLangObj.aiName} word or phrase into French.
+Return ONLY a raw JSON object, no markdown, no extra text:
+{"frenchWord":"the French translation","translation":"${query.trim()}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence using the word","exampleTranslation":"translation of example in ${currentLangObj.aiName}","found":true,"suggestions":[]}`
+        : `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
+If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
 
-        If the word has a typo or is misspelled, set found:false and put 2-3 correct spelling suggestions in "suggestions".
-        If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
-        {"frenchWord":"...","translation":"accurate short translation in ${currentLangObj.aiName}, 1-4 words","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[]}`,
+If the word has a typo or is misspelled (only for French words), set found:false and put 2-3 correct French spelling suggestions in "suggestions".
+If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
+{"frenchWord":"...","translation":"accurate short translation in ${currentLangObj.aiName}, 1-4 words","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[]}`;
+
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await generateWithFallback(ai, {
+        contents: prompt,
         config: {}
       });
-
-      const parts = response?.candidates?.[0]?.content?.parts;
-      console.log('[DEBUG] parts count:', parts?.length, 'part keys:', parts?.[0] ? Object.keys(parts[0]) : 'none');
-      console.log('[DEBUG] Response received:', extractJson(response)?.slice(0, 200));
       const result = JSON.parse(extractJson(response) || '{}');
 
       if (result.found && result.frenchWord && result.translation) {
