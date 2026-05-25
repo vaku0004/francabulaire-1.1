@@ -2454,17 +2454,21 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                                 }
                               }}
                               className={`mx-1 px-3 py-1 rounded-lg border-2 transition-all inline-flex items-center justify-center min-w-[80px] h-9 align-middle cursor-pointer group hover:scale-105 active:scale-95 ${
-                                userAnswers[gapIndex] 
-                                  ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-bold' 
-                                  : 'bg-white border-dashed border-slate-300'
-                              } ${selectedGapIndex === gapIndex ? 'ring-2 ring-indigo-500 ring-offset-2 border-indigo-500' : ''} 
-                                ${exerciseFeedback === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-700 pointer-events-none' : ''}
-                                ${exerciseFeedback === 'error' && userAnswers[gapIndex] !== generatedStory.gaps[gapIndex] ? 'bg-red-50 border-red-200 text-red-700 ring-red-500/20' : ''}`}
+                                exerciseFeedback === 'success'
+                                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700 pointer-events-none'
+                                  : exerciseFeedback === 'error' && userAnswers[gapIndex] !== generatedStory.gaps[gapIndex]
+                                    ? 'bg-red-50 border-red-200 text-red-600 font-bold'
+                                    : exerciseFeedback === 'error' && userAnswers[gapIndex] === generatedStory.gaps[gapIndex]
+                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-700 font-bold'
+                                      : userAnswers[gapIndex]
+                                        ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-bold'
+                                        : 'bg-white border-dashed border-slate-300'
+                              } ${selectedGapIndex === gapIndex && !exerciseFeedback ? 'ring-2 ring-indigo-500 ring-offset-2 border-indigo-500' : ''}`}
                             >
                               {userAnswers[gapIndex] || (
-                                <span className="text-slate-300 text-xs font-bold opacity-0 group-hover:opacity-100 transition-opacity">
-                                  {gapIndex + 1}
-                                </span>
+                                exerciseFeedback === 'error'
+                                  ? <span className="text-red-400 text-xs font-bold">— пропущено —</span>
+                                  : <span className="text-slate-300 text-xs font-bold opacity-0 group-hover:opacity-100 transition-opacity">{gapIndex + 1}</span>
                               )}
                             </button>
                           );
@@ -2559,18 +2563,16 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                         <RefreshCw size={20} />
                       </button>
                       
-                      <button 
-                        disabled={userAnswers.includes('') || exerciseFeedback === 'success'}
+                      <button
+                        disabled={exerciseFeedback === 'success'}
                         onClick={() => {
                           const isCorrect = userAnswers.every((ans, i) => ans === generatedStory.gaps[i]);
                           setExerciseFeedback(isCorrect ? 'success' : 'error');
                         }}
                         className={`flex-1 py-4 rounded-2xl font-bold text-sm uppercase tracking-widest transition-all shadow-lg ${
-                          userAnswers.includes('') 
-                            ? 'bg-slate-100 text-slate-400 shadow-none' 
-                            : exerciseFeedback === 'success'
-                              ? 'bg-emerald-500 text-white shadow-emerald-100'
-                              : 'bg-indigo-600 text-white shadow-indigo-100 hover:bg-indigo-700 active:scale-[0.98]'
+                          exerciseFeedback === 'success'
+                            ? 'bg-emerald-500 text-white shadow-emerald-100 pointer-events-none'
+                            : 'bg-indigo-600 text-white shadow-indigo-100 hover:bg-indigo-700 active:scale-[0.98]'
                         }`}
                       >
                         {exerciseFeedback === 'success' ? 'Parfait !' : 'Vérifier'}
