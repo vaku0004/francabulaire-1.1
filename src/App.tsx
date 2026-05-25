@@ -160,13 +160,16 @@ export default function App() {
       }
       const ai = new GoogleGenAI({ apiKey });
 
-      // Get 10 random words from current language
-      const langWords = words.filter(w => 
-        targetLanguage === 'Russe' ? (!w.target_lang || w.target_lang === 'Russe') : (w.target_lang === targetLanguage)
-      );
-      
+      // Get 10 random words from current language that have been reviewed at least once
+      const langWords = words.filter(w => {
+        const matchesLang = targetLanguage === 'Russe'
+          ? (!w.target_lang || w.target_lang === 'Russe')
+          : (w.target_lang === targetLanguage);
+        return matchesLang && (w.review_count ?? 0) > 0;
+      });
+
       if (langWords.length < 5) {
-        alert("Il vous faut au moins 5 mots dans votre bibliothèque pour générer une histoire.");
+        alert("Il vous faut au moins 5 mots révisés en mode cartes pour générer une histoire. Révisez d'abord quelques mots !");
         setIsStoryLoading(false);
         return;
       }
@@ -406,16 +409,16 @@ export default function App() {
   const [isProcessingMatch, setIsProcessingMatch] = useState(false);
 
   const startMatchGame = useCallback(() => {
-    // Filter words for current language, having translations, and NOT mastered
+    // Filter words for current language, having translations, NOT mastered, and already reviewed at least once
     const availableWords = words.filter(w => {
-      const matchesLang = targetLanguage === 'Russe' 
+      const matchesLang = targetLanguage === 'Russe'
         ? (!w.target_lang || w.target_lang === 'Russe')
         : (w.target_lang === targetLanguage);
-      return matchesLang && w.word && w.translation && w.status !== 'mastered';
+      return matchesLang && w.word && w.translation && w.status !== 'mastered' && (w.review_count ?? 0) > 0;
     });
 
     if (availableWords.length < 5) {
-      alert("Il faut au moins 5 mots non-maîtrisés dans votre bibliothèque pour jouer.");
+      alert("Il faut au moins 5 mots révisés en mode cartes pour jouer. Révisez d'abord quelques mots !");
       return;
     }
 
