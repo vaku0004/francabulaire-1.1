@@ -176,7 +176,7 @@ export default function App() {
 
       const selectedWords = [...langWords]
         .sort(() => Math.random() - 0.5)
-        .slice(0, Math.min(10, langWords.length));
+        .slice(0, Math.min(5, langWords.length));
       
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
