@@ -181,15 +181,25 @@ export default function App() {
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
       const response = await generateWithFallback(ai, {
-        contents: `Tu es un professeur de français. Crée une petite histoire cohérente et intéressante en français utilisant EXACTEMENT ces mots : ${wordListStr}.
-        L'histoire doit être d'un niveau intermédiaire (B1).
-        
-        Retourne UNIQUEMENT un objet JSON avec :
-        1. "title": un titre pour l'histoire.
-        2. "story": le texte de l'histoire où chaque mot de la liste est remplacé par un marqueur comme {{0}}, {{1}}, etc. dans l'ordre d'apparition.
-        3. "gaps": la liste ordonnée des mots correspondant aux marqueurs {{0}}, {{1}}, etc.
-        
-        Exemple : "Le {{0}} est bleu." avec gaps: ["ciel"].`,
+        contents: `Tu es un professeur de français. Pour chaque mot de la liste, écris UNE phrase simple et naturelle en français (niveau A2-B1) où ce mot est manquant et doit être deviné grâce au contexte.
+
+Les phrases sont INDÉPENDANTES les unes des autres — pas besoin de les relier en histoire.
+Chaque phrase doit rendre le mot manquant ÉVIDENT par le contexte (situation claire, synonyme, antonyme, explication).
+
+Mots : ${wordListStr}
+
+Retourne UNIQUEMENT un objet JSON (sans markdown) :
+{
+  "title": "Complétez les phrases",
+  "story": "Phrase 1 avec {{0}}.\nPhrase 2 avec {{1}}.\nPhrase 3 avec {{2}}.",
+  "gaps": ["mot0", "mot1", "mot2"]
+}
+
+Règles importantes :
+- Le marqueur {{N}} correspond exactement à gaps[N]
+- Une seule phrase par mot, une seule lacune par phrase
+- Le contexte autour du trou doit clairement indiquer quel mot manque
+- Les phrases ne doivent PAS être liées entre elles`,
         config: {}
       });
 
@@ -2377,8 +2387,8 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <FileText size={24} />
                   </div>
                   <div>
-                    <h3 className="text-xl font-bold text-slate-900">Histoires et Lacunes</h3>
-                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Entraînez-vous avec votre vocabulaire</p>
+                    <h3 className="text-xl font-bold text-slate-900">Phrases à compléter</h3>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Devinez le mot manquant dans chaque phrase</p>
                   </div>
                 </div>
                 <button 
@@ -2398,7 +2408,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <div className="space-y-2">
                       <h4 className="text-lg font-bold text-slate-900">Prêt pour un défi ?</h4>
                       <p className="text-sm text-slate-500 max-w-xs mx-auto">
-                        Je vais générer une courte histoire en utilisant les mots de votre bibliothèque. À vous de remplir les blancs !
+                        Je vais créer des phrases indépendantes avec vos mots. À vous de trouver le mot manquant dans chaque phrase !
                       </p>
                     </div>
                     <button 
@@ -2406,7 +2416,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                       className="px-8 py-4 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 flex items-center gap-2 mx-auto"
                     >
                       <Sparkles size={18} />
-                      Générer l'histoire
+                      Générer les phrases
                     </button>
                   </div>
                 )}
@@ -2417,7 +2427,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                       <div className="absolute inset-0 border-4 border-indigo-100 rounded-full"></div>
                       <div className="absolute inset-0 border-4 border-indigo-600 rounded-full border-t-transparent animate-spin"></div>
                     </div>
-                    <p className="text-slate-500 font-medium animate-pulse">Inspiration en cours...</p>
+                    <p className="text-slate-500 font-medium animate-pulse">Création des phrases en cours...</p>
                   </div>
                 )}
 
@@ -2430,51 +2440,55 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                       <div className="h-1 w-12 bg-indigo-100 mx-auto rounded-full"></div>
                     </div>
 
-                    <div className="p-6 bg-slate-50 rounded-3xl text-lg leading-relaxed text-slate-700 font-medium whitespace-pre-wrap">
-                      {generatedStory.story.split(/(\{\{\d+\}\})/).map((part, index) => {
-                        const match = part.match(/\{\{(\d+)\}\}/);
-                        if (match) {
-                          const gapIndex = parseInt(match[1]);
-                          return (
-                            <button
-                              key={index}
-                              onClick={() => {
-                                if (exerciseFeedback === 'success') return;
-                                
-                                if (userAnswers[gapIndex]) {
-                                  // Clear word
-                                  const newAnswers = [...userAnswers];
-                                  newAnswers[gapIndex] = '';
-                                  setUserAnswers(newAnswers);
-                                  setExerciseFeedback(null);
-                                  setSelectedGapIndex(gapIndex);
-                                } else {
-                                  // Select empty gap
-                                  setSelectedGapIndex(gapIndex === selectedGapIndex ? null : gapIndex);
-                                }
-                              }}
-                              className={`mx-1 px-3 py-1 rounded-lg border-2 transition-all inline-flex items-center justify-center min-w-[80px] h-9 align-middle cursor-pointer group hover:scale-105 active:scale-95 ${
-                                exerciseFeedback === 'success'
-                                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700 pointer-events-none'
-                                  : exerciseFeedback === 'error' && userAnswers[gapIndex] !== generatedStory.gaps[gapIndex]
-                                    ? 'bg-red-50 border-red-200 text-red-600 font-bold'
-                                    : exerciseFeedback === 'error' && userAnswers[gapIndex] === generatedStory.gaps[gapIndex]
-                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-700 font-bold'
-                                      : userAnswers[gapIndex]
-                                        ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-bold'
-                                        : 'bg-white border-dashed border-slate-300'
-                              } ${selectedGapIndex === gapIndex && !exerciseFeedback ? 'ring-2 ring-indigo-500 ring-offset-2 border-indigo-500' : ''}`}
-                            >
-                              {userAnswers[gapIndex] || (
-                                exerciseFeedback === 'error'
-                                  ? <span className="text-red-400 text-xs font-bold">— пропущено —</span>
-                                  : <span className="text-slate-300 text-xs font-bold opacity-0 group-hover:opacity-100 transition-opacity">{gapIndex + 1}</span>
-                              )}
-                            </button>
-                          );
-                        }
-                        return <span key={index}>{part}</span>;
-                      })}
+                    <div className="space-y-3">
+                      {generatedStory.story.split('\n').filter(line => line.trim()).map((line, lineIndex) => (
+                        <div key={lineIndex} className="flex items-start gap-3 p-4 bg-slate-50 rounded-2xl">
+                          <span className="flex-shrink-0 w-6 h-6 bg-indigo-100 text-indigo-500 rounded-full text-xs font-bold flex items-center justify-center mt-0.5">{lineIndex + 1}</span>
+                          <div className="text-base leading-relaxed text-slate-700 font-medium flex-1 flex flex-wrap items-center gap-y-1">
+                            {line.split(/(\{\{\d+\}\})/).map((part, partIndex) => {
+                              const match = part.match(/\{\{(\d+)\}\}/);
+                              if (match) {
+                                const gapIndex = parseInt(match[1]);
+                                return (
+                                  <button
+                                    key={partIndex}
+                                    onClick={() => {
+                                      if (exerciseFeedback === 'success') return;
+                                      if (userAnswers[gapIndex]) {
+                                        const newAnswers = [...userAnswers];
+                                        newAnswers[gapIndex] = '';
+                                        setUserAnswers(newAnswers);
+                                        setExerciseFeedback(null);
+                                        setSelectedGapIndex(gapIndex);
+                                      } else {
+                                        setSelectedGapIndex(gapIndex === selectedGapIndex ? null : gapIndex);
+                                      }
+                                    }}
+                                    className={`mx-1 px-3 py-1 rounded-lg border-2 transition-all inline-flex items-center justify-center min-w-[80px] h-9 cursor-pointer group hover:scale-105 active:scale-95 ${
+                                      exerciseFeedback === 'success'
+                                        ? 'bg-emerald-50 border-emerald-200 text-emerald-700 font-bold pointer-events-none'
+                                        : exerciseFeedback === 'error' && userAnswers[gapIndex] !== generatedStory.gaps[gapIndex]
+                                          ? 'bg-red-50 border-red-200 text-red-600 font-bold'
+                                          : exerciseFeedback === 'error' && userAnswers[gapIndex] === generatedStory.gaps[gapIndex]
+                                            ? 'bg-emerald-50 border-emerald-200 text-emerald-700 font-bold'
+                                            : userAnswers[gapIndex]
+                                              ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-bold'
+                                              : 'bg-white border-dashed border-slate-300'
+                                    } ${selectedGapIndex === gapIndex && !exerciseFeedback ? 'ring-2 ring-indigo-500 ring-offset-2 border-indigo-500' : ''}`}
+                                  >
+                                    {userAnswers[gapIndex] || (
+                                      exerciseFeedback === 'error'
+                                        ? <span className="text-red-400 text-xs font-bold">— пропущено —</span>
+                                        : <span className="text-slate-300 text-xs font-bold opacity-0 group-hover:opacity-100 transition-opacity">?</span>
+                                    )}
+                                  </button>
+                                );
+                              }
+                              return <span key={partIndex}>{part}</span>;
+                            })}
+                          </div>
+                        </div>
+                      ))}
                     </div>
 
                     <div className="space-y-4">
