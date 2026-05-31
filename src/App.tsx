@@ -930,27 +930,20 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
     }
   }, [targetLanguage, currentLangObj.aiName, words, normalizeWord]);
 
-  // Debounce search
+  // Reset search state when query is cleared
   useEffect(() => {
     if (!searchQuery) {
       lastFetchedQuery.current = '';
       setIsSearching(false);
-      return;
+      setError(null);
+      setSuggestions([]);
     }
+  }, [searchQuery]);
 
-    if (searchResult) {
-      setIsSearching(false);
-      return;
-    }
-
-    // Longer debounce for phrases (multiple words)
-    const isPhrase = searchQuery.trim().includes(' ');
-    const delay = isPhrase ? 2000 : 1200;
-    const timer = setTimeout(() => {
+  const triggerSearch = useCallback(() => {
+    if (searchQuery.trim().length >= 2 && !searchResult) {
       fetchTranslation(searchQuery);
-    }, delay);
-
-    return () => clearTimeout(timer);
+    }
   }, [searchQuery, searchResult, fetchTranslation]);
 
   // Auto-start review if words are due, or refresh if language changes
@@ -1637,15 +1630,27 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 </AnimatePresence>
                 
                 <div className="relative">
-                  <input 
+                  <input
                     id="fr_word_input"
                     type="text"
                     placeholder={`Mot français ou ${currentLangObj.name.toLowerCase()}...`}
                     value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value);
+                      setError(null);
+                      setSuggestions([]);
+                      lastFetchedQuery.current = '';
+                    }}
+                    onKeyDown={(e) => e.key === 'Enter' && triggerSearch()}
                     className="w-full pl-10 pr-24 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all font-medium"
                   />
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <button
+                    onClick={triggerSearch}
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-500 transition-colors"
+                    title="Rechercher"
+                  >
+                    <Search size={18} />
+                  </button>
                   
                   <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
                     <button 
