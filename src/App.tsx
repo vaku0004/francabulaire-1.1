@@ -930,20 +930,29 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
     }
   }, [targetLanguage, currentLangObj.aiName, words, normalizeWord]);
 
-  // Reset search state when query is cleared
+  const triggerSearch = useCallback(() => {
+    if (searchQuery.trim().length >= 2 && !searchResult) {
+      fetchTranslation(searchQuery);
+    }
+  }, [searchQuery, searchResult, fetchTranslation]);
+
+  // Auto-search with 2s debounce after user stops typing
   useEffect(() => {
     if (!searchQuery) {
       lastFetchedQuery.current = '';
       setIsSearching(false);
       setError(null);
       setSuggestions([]);
+      return;
     }
-  }, [searchQuery]);
-
-  const triggerSearch = useCallback(() => {
-    if (searchQuery.trim().length >= 2 && !searchResult) {
+    if (searchResult) {
+      setIsSearching(false);
+      return;
+    }
+    const timer = setTimeout(() => {
       fetchTranslation(searchQuery);
-    }
+    }, 2000);
+    return () => clearTimeout(timer);
   }, [searchQuery, searchResult, fetchTranslation]);
 
   // Auto-start review if words are due, or refresh if language changes
