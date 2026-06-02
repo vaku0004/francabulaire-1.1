@@ -2583,14 +2583,14 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     </div>
 
                     <div className="pt-6 border-t border-slate-100 flex items-center justify-between gap-4">
-                      <button 
+                      <button
                         onClick={generateStoryExercise}
                         className="p-3 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all"
-                        title="Nouvelle histoire"
+                        title="Nouvelles phrases"
                       >
                         <RefreshCw size={20} />
                       </button>
-                      
+
                       <button
                         disabled={exerciseFeedback === 'success'}
                         onClick={() => {
@@ -2606,6 +2606,25 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                         {exerciseFeedback === 'success' ? 'Parfait !' : 'Vérifier'}
                       </button>
                     </div>
+
+                    <AnimatePresence>
+                      {exerciseFeedback === 'success' && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 16 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: 8 }}
+                          className="pt-2"
+                        >
+                          <button
+                            onClick={generateStoryExercise}
+                            className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                          >
+                            <Sparkles size={18} />
+                            Nouvelles phrases
+                          </button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
 
                     {exerciseFeedback === 'error' && (
                       <motion.p 
