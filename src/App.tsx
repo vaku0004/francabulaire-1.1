@@ -160,23 +160,32 @@ export default function App() {
       }
       const ai = new GoogleGenAI({ apiKey });
 
-      // Get 10 random words from current language that have been reviewed at least once
-      const langWords = words.filter(w => {
+      // Eligible: reviewed at least once, not mastered
+      const eligible = words.filter(w => {
         const matchesLang = targetLanguage === 'Russe'
           ? (!w.target_lang || w.target_lang === 'Russe')
           : (w.target_lang === targetLanguage);
-        return matchesLang && (w.review_count ?? 0) > 0;
+        return matchesLang && (w.review_count ?? 0) > 0 && w.status !== 'mastered';
       });
 
-      if (langWords.length < 5) {
+      if (eligible.length < 5) {
         alert("Il vous faut au moins 5 mots révisés en mode cartes pour générer une histoire. Révisez d'abord quelques mots !");
         setIsStoryLoading(false);
         return;
       }
 
-      const selectedWords = [...langWords]
+      // Prefer words not yet used in this session; reset pool when all used
+      let unused = eligible.filter(w => !usedExerciseWordIds.current.has(w.id));
+      if (unused.length < 5) {
+        usedExerciseWordIds.current.clear();
+        unused = eligible;
+      }
+
+      const selectedWords = [...unused]
         .sort(() => Math.random() - 0.5)
-        .slice(0, Math.min(5, langWords.length));
+        .slice(0, 5);
+
+      selectedWords.forEach(w => usedExerciseWordIds.current.add(w.id));
       
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
@@ -404,6 +413,7 @@ Règles importantes :
   const [exerciseFeedback, setExerciseFeedback] = useState<'success' | 'error' | null>(null);
   const [selectedGapIndex, setSelectedGapIndex] = useState<number | null>(null);
   const [wordHintIndex, setWordHintIndex] = useState<number | null>(null);
+  const usedExerciseWordIds = React.useRef<Set<string>>(new Set());
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [editingWord, setEditingWord] = useState<Word | null>(null);
 
@@ -2446,9 +2456,9 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 )}
 
                 {generatedStory && !isStoryLoading && (
-                  <div className="space-y-8">
+                  <div className="space-y-6">
                     <div className="text-center">
-                      <h4 className="text-2xl font-serif font-bold text-slate-900 mb-2 italic">
+                      <h4 className="text-xl font-serif font-bold text-slate-900 mb-2 italic">
                         {generatedStory.title}
                       </h4>
                       <div className="h-1 w-12 bg-indigo-100 mx-auto rounded-full"></div>
@@ -2504,141 +2514,127 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                         </div>
                       ))}
                     </div>
-
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Banque de mots</span>
-                        <button 
-                          onClick={() => setUserAnswers(new Array(generatedStory.gaps.length).fill(''))}
-                          className="text-[10px] font-bold uppercase text-slate-400 hover:text-red-500 transition-colors"
-                        >
-                          Effacer tout
-                        </button>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {generatedStory.shuffledGaps.map((word, index) => {
-                          const usedCount = userAnswers.filter(a => a === word).length;
-                          const totalCount = generatedStory.gaps.filter(g => g === word).length;
-                          const isUsed = usedCount >= totalCount;
-                          const isShowingHint = wordHintIndex === index;
-
-                          // Find the translation for this word
-                          const wordObj = words.find(w => 
-                            w.word.toLowerCase() === word.toLowerCase() || 
-                            (w.french_word && w.french_word.toLowerCase() === word.toLowerCase())
-                          );
-
-                          return (
-                            <div key={index} className="relative group">
-                              <button
-                                disabled={isUsed || exerciseFeedback === 'success'}
-                                onClick={() => {
-                                  if (isShowingHint) {
-                                    setWordHintIndex(null);
-                                    return;
-                                  }
-                                  const newAnswers = [...userAnswers];
-                                  const targetIndex = selectedGapIndex !== null && userAnswers[selectedGapIndex] === '' 
-                                    ? selectedGapIndex 
-                                    : userAnswers.indexOf('');
-
-                                  if (targetIndex !== -1) {
-                                    newAnswers[targetIndex] = word;
-                                    setUserAnswers(newAnswers);
-                                    setExerciseFeedback(null);
-                                    
-                                    // Clear selection if we fulfilled it
-                                    if (targetIndex === selectedGapIndex) setSelectedGapIndex(null);
-                                  }
-                                }}
-                                className={`px-4 py-2 rounded-xl text-sm font-bold border transition-all min-h-[40px] flex items-center justify-center ${
-                                  isUsed 
-                                    ? 'bg-slate-100 border-slate-100 text-slate-300 cursor-not-allowed opacity-50' 
-                                    : 'bg-white border-slate-200 text-slate-700 hover:border-indigo-300 hover:bg-indigo-50 active:scale-95'
-                                } ${isShowingHint ? 'bg-indigo-50 border-indigo-400 text-indigo-600 scale-[1.02] z-10 shadow-lg ring-2 ring-indigo-200' : ''}`}
-                              >
-                                {isShowingHint && wordObj ? wordObj.translation : word}
-                              </button>
-                              
-                              {!isUsed && exerciseFeedback !== 'success' && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setWordHintIndex(isShowingHint ? null : index);
-                                  }}
-                                  className={`absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full flex items-center justify-center shadow-sm border transition-all z-20 ${
-                                    isShowingHint 
-                                      ? 'bg-indigo-600 border-indigo-600 text-white animate-pulse' 
-                                      : 'bg-white border-slate-200 text-slate-400 hover:text-indigo-600 hover:border-indigo-300'
-                                  }`}
-                                  title="Voir la traduction"
-                                >
-                                  <Languages size={10} />
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    <div className="pt-6 border-t border-slate-100 flex items-center justify-between gap-4">
-                      <button
-                        onClick={generateStoryExercise}
-                        className="p-3 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all"
-                        title="Nouvelles phrases"
-                      >
-                        <RefreshCw size={20} />
-                      </button>
-
-                      <button
-                        disabled={exerciseFeedback === 'success'}
-                        onClick={() => {
-                          const isCorrect = userAnswers.every((ans, i) => ans === generatedStory.gaps[i]);
-                          setExerciseFeedback(isCorrect ? 'success' : 'error');
-                        }}
-                        className={`flex-1 py-4 rounded-2xl font-bold text-sm uppercase tracking-widest transition-all shadow-lg ${
-                          exerciseFeedback === 'success'
-                            ? 'bg-emerald-500 text-white shadow-emerald-100 pointer-events-none'
-                            : 'bg-indigo-600 text-white shadow-indigo-100 hover:bg-indigo-700 active:scale-[0.98]'
-                        }`}
-                      >
-                        {exerciseFeedback === 'success' ? 'Parfait !' : 'Vérifier'}
-                      </button>
-                    </div>
-
-                    <AnimatePresence>
-                      {exerciseFeedback === 'success' && (
-                        <motion.div
-                          initial={{ opacity: 0, y: 16 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: 8 }}
-                          className="pt-2"
-                        >
-                          <button
-                            onClick={generateStoryExercise}
-                            className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
-                          >
-                            <Sparkles size={18} />
-                            Nouvelles phrases
-                          </button>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-
-                    {exerciseFeedback === 'error' && (
-                      <motion.p 
-                        initial={{ opacity: 0, y: -10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="text-center text-sm font-bold text-red-500 flex items-center justify-center gap-2"
-                      >
-                        <AlertCircle size={16} />
-                        Certains mots ne sont pas à la bonne place.
-                      </motion.p>
-                    )}
                   </div>
                 )}
               </div>
+
+              {/* Sticky bottom panel — word bank + verify button */}
+              {generatedStory && !isStoryLoading && (
+                <div className="border-t border-slate-100 bg-white p-4 space-y-3 flex-shrink-0">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Banque de mots</span>
+                    <button
+                      onClick={() => { setUserAnswers(new Array(generatedStory.gaps.length).fill('')); setExerciseFeedback(null); }}
+                      className="text-[10px] font-bold uppercase text-slate-400 hover:text-red-500 transition-colors"
+                    >
+                      Effacer tout
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {generatedStory.shuffledGaps.map((word, index) => {
+                      const usedCount = userAnswers.filter(a => a === word).length;
+                      const totalCount = generatedStory.gaps.filter(g => g === word).length;
+                      const isUsed = usedCount >= totalCount;
+                      const isShowingHint = wordHintIndex === index;
+                      const wordObj = words.find(w =>
+                        w.word.toLowerCase() === word.toLowerCase() ||
+                        (w.french_word && w.french_word.toLowerCase() === word.toLowerCase())
+                      );
+                      return (
+                        <div key={index} className="relative group">
+                          <button
+                            disabled={isUsed || exerciseFeedback === 'success'}
+                            onClick={() => {
+                              if (isShowingHint) { setWordHintIndex(null); return; }
+                              const newAnswers = [...userAnswers];
+                              const targetIndex = selectedGapIndex !== null && userAnswers[selectedGapIndex] === ''
+                                ? selectedGapIndex
+                                : userAnswers.indexOf('');
+                              if (targetIndex !== -1) {
+                                newAnswers[targetIndex] = word;
+                                setUserAnswers(newAnswers);
+                                setExerciseFeedback(null);
+                                if (targetIndex === selectedGapIndex) setSelectedGapIndex(null);
+                              }
+                            }}
+                            className={`px-4 py-2 rounded-xl text-sm font-bold border transition-all min-h-[40px] flex items-center justify-center ${
+                              isUsed
+                                ? 'bg-slate-100 border-slate-100 text-slate-300 cursor-not-allowed opacity-50'
+                                : 'bg-white border-slate-200 text-slate-700 hover:border-indigo-300 hover:bg-indigo-50 active:scale-95'
+                            } ${isShowingHint ? 'bg-indigo-50 border-indigo-400 text-indigo-600 scale-[1.02] z-10 shadow-lg ring-2 ring-indigo-200' : ''}`}
+                          >
+                            {isShowingHint && wordObj ? wordObj.translation : word}
+                          </button>
+                          {!isUsed && exerciseFeedback !== 'success' && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setWordHintIndex(isShowingHint ? null : index); }}
+                              className={`absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full flex items-center justify-center shadow-sm border transition-all z-20 ${
+                                isShowingHint
+                                  ? 'bg-indigo-600 border-indigo-600 text-white animate-pulse'
+                                  : 'bg-white border-slate-200 text-slate-400 hover:text-indigo-600 hover:border-indigo-300'
+                              }`}
+                              title="Voir la traduction"
+                            >
+                              <Languages size={10} />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex items-center gap-3 pt-1">
+                    <button
+                      onClick={generateStoryExercise}
+                      className="p-3 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all flex-shrink-0"
+                      title="Nouvelles phrases"
+                    >
+                      <RefreshCw size={20} />
+                    </button>
+
+                    <AnimatePresence mode="wait">
+                      {exerciseFeedback === 'success' ? (
+                        <motion.button
+                          key="new"
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          onClick={generateStoryExercise}
+                          className="flex-1 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                        >
+                          <Sparkles size={16} />
+                          Nouvelles phrases
+                        </motion.button>
+                      ) : (
+                        <motion.button
+                          key="verify"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          onClick={() => {
+                            const isCorrect = userAnswers.every((ans, i) => ans === generatedStory.gaps[i]);
+                            setExerciseFeedback(isCorrect ? 'success' : 'error');
+                          }}
+                          className="flex-1 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
+                        >
+                          Vérifier
+                        </motion.button>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  {exerciseFeedback === 'error' && (
+                    <p className="text-center text-xs font-bold text-red-500 flex items-center justify-center gap-1.5">
+                      <AlertCircle size={14} />
+                      Certains mots ne sont pas à la bonne place.
+                    </p>
+                  )}
+                  {exerciseFeedback === 'success' && (
+                    <p className="text-center text-xs font-bold text-emerald-500 flex items-center justify-center gap-1.5">
+                      <CheckCircle2 size={14} />
+                      Parfait ! Toutes les réponses sont correctes.
+                    </p>
+                  )}
+                </div>
+              )}
             </motion.div>
           </div>
         )}
