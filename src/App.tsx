@@ -773,17 +773,23 @@ Règles importantes :
     }
   };
 
-  // Filter words for review
+  // Filter words for review — sorted by priority: forgotten first, then almost, then remembered
   const reviewQueue = useMemo(() => {
     const now = Date.now();
     return words
       .filter(w => {
-        const matchesLang = targetLanguage === 'Russe' 
+        const matchesLang = targetLanguage === 'Russe'
           ? (!w.target_lang || w.target_lang === 'Russe')
           : (w.target_lang === targetLanguage);
         return matchesLang && w.status !== 'mastered' && w.next_review_at <= now;
       })
-      .sort((a, b) => a.next_review_at - b.next_review_at);
+      .sort((a, b) => {
+        // Lower review_count = more forgotten = higher priority
+        const diff = (a.review_count ?? 0) - (b.review_count ?? 0);
+        if (diff !== 0) return diff;
+        // Among same level: earlier due date first
+        return a.next_review_at - b.next_review_at;
+      });
   }, [words, isReviewing, targetLanguage]);
 
   const currentWord = sessionQueue[currentReviewIndex];
