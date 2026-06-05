@@ -161,12 +161,20 @@ export default function App() {
       const ai = new GoogleGenAI({ apiKey });
 
       // Eligible: reviewed at least once, not mastered
-      const eligible = words.filter(w => {
-        const matchesLang = targetLanguage === 'Russe'
-          ? (!w.target_lang || w.target_lang === 'Russe')
-          : (w.target_lang === targetLanguage);
-        return matchesLang && (w.review_count ?? 0) > 0 && w.status !== 'mastered';
-      });
+      // Priority: learning with low review_count first (struggling), then higher counts
+      const eligible = words
+        .filter(w => {
+          const matchesLang = targetLanguage === 'Russe'
+            ? (!w.target_lang || w.target_lang === 'Russe')
+            : (w.target_lang === targetLanguage);
+          return matchesLang && (w.review_count ?? 0) > 0 && w.status !== 'mastered';
+        })
+        .sort((a, b) => {
+          // Lower review_count = needs more practice = higher priority
+          const diff = (a.review_count ?? 0) - (b.review_count ?? 0);
+          if (diff !== 0) return diff;
+          return (a.next_review_at ?? 0) - (b.next_review_at ?? 0);
+        });
 
       if (eligible.length < 5) {
         alert("Il vous faut au moins 5 mots révisés en mode cartes pour générer une histoire. Révisez d'abord quelques mots !");
@@ -174,18 +182,24 @@ export default function App() {
         return;
       }
 
-      // Prefer words not yet used in this session; reset pool when all used
-      let unused = eligible.filter(w => !usedExerciseWordIds.current.has(w.id));
-      if (unused.length < 5) {
-        usedExerciseWordIds.current.clear();
-        unused = eligible;
+      // Exclude the last batch of used words; if not enough remain, reset and start over
+      let candidates = eligible.filter(w => !usedExerciseWordIds.current.has(w.id));
+      if (candidates.length < 5) {
+        usedExerciseWordIds.current = new Set();
+        candidates = eligible;
       }
 
-      const selectedWords = [...unused]
-        .sort(() => Math.random() - 0.5)
+      // Take top 5 by priority, with slight shuffle within same review_count tier
+      const selectedWords = candidates
+        .slice(0, Math.min(10, candidates.length))
+        .sort((a, b) => {
+          const diff = (a.review_count ?? 0) - (b.review_count ?? 0);
+          return diff !== 0 ? diff : Math.random() - 0.5;
+        })
         .slice(0, 5);
 
-      selectedWords.forEach(w => usedExerciseWordIds.current.add(w.id));
+      // Remember only this batch (not cumulative) to avoid repeats next time
+      usedExerciseWordIds.current = new Set(selectedWords.map(w => w.id));
       
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
