@@ -94,6 +94,9 @@ function extractJson(response: any): string {
 }
 
 export default function App() {
+  // Ref declared at the very top so generateStoryExercise can reliably access it
+  const usedExerciseWordIds = React.useRef<Set<string>>(new Set());
+
   const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
@@ -440,7 +443,6 @@ Règles importantes :
   const [exerciseFeedback, setExerciseFeedback] = useState<'success' | 'error' | null>(null);
   const [selectedGapIndex, setSelectedGapIndex] = useState<number | null>(null);
   const [wordHintIndex, setWordHintIndex] = useState<number | null>(null);
-  const usedExerciseWordIds = React.useRef<Set<string>>(new Set());
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [editingWord, setEditingWord] = useState<Word | null>(null);
 
