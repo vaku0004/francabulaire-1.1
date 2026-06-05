@@ -160,45 +160,58 @@ export default function App() {
       }
       const ai = new GoogleGenAI({ apiKey });
 
-      // Eligible: reviewed at least once, not mastered
-      // Priority: learning with low review_count first (struggling), then higher counts
-      const eligible = words
-        .filter(w => {
-          const matchesLang = targetLanguage === 'Russe'
-            ? (!w.target_lang || w.target_lang === 'Russe')
-            : (w.target_lang === targetLanguage);
-          return matchesLang && (w.review_count ?? 0) > 0 && w.status !== 'mastered';
-        })
-        .sort((a, b) => {
-          // Lower review_count = needs more practice = higher priority
+      // Helper: sort reviewed words by priority (struggling first)
+      const sortByPriority = (arr: typeof words) =>
+        [...arr].sort((a, b) => {
           const diff = (a.review_count ?? 0) - (b.review_count ?? 0);
-          if (diff !== 0) return diff;
-          return (a.next_review_at ?? 0) - (b.next_review_at ?? 0);
+          return diff !== 0 ? diff : (a.next_review_at ?? 0) - (b.next_review_at ?? 0);
         });
 
-      if (eligible.length < 5) {
-        alert("Il vous faut au moins 5 mots révisés en mode cartes pour générer une histoire. Révisez d'abord quelques mots !");
+      const matchesLang = (w: typeof words[0]) =>
+        targetLanguage === 'Russe'
+          ? (!w.target_lang || w.target_lang === 'Russe')
+          : w.target_lang === targetLanguage;
+
+      // Primary pool: reviewed, not mastered — highest priority
+      const primaryPool = sortByPriority(
+        words.filter(w => matchesLang(w) && (w.review_count ?? 0) > 0 && w.status !== 'mastered')
+      );
+
+      // Extended pool: include mastered words as fallback for variety
+      const extendedPool = sortByPriority(
+        words.filter(w => matchesLang(w) && (w.review_count ?? 0) > 0)
+      );
+
+      const pool = extendedPool.length >= 5 ? extendedPool : [];
+
+      if (pool.length < 5) {
+        alert("Il vous faut au moins 5 mots révisés en mode cartes pour générer un exercice. Révisez d'abord quelques mots !");
         setIsStoryLoading(false);
         return;
       }
 
-      // Exclude the last batch of used words; if not enough remain, reset and start over
-      let candidates = eligible.filter(w => !usedExerciseWordIds.current.has(w.id));
+      // Exclude last batch; if not enough fresh words, reset tracking
+      let candidates = pool.filter(w => !usedExerciseWordIds.current.has(w.id));
       if (candidates.length < 5) {
         usedExerciseWordIds.current = new Set();
-        candidates = eligible;
+        // Prefer primary (non-mastered) first, then mastered as padding
+        candidates = [
+          ...primaryPool.filter(w => !usedExerciseWordIds.current.has(w.id)),
+          ...extendedPool.filter(w => w.status === 'mastered' && !usedExerciseWordIds.current.has(w.id)),
+        ];
+        if (candidates.length < 5) candidates = pool;
       }
 
-      // Take top 5 by priority, with slight shuffle within same review_count tier
+      // Pick top 5: priority sorted, shuffle within same review_count tier
       const selectedWords = candidates
-        .slice(0, Math.min(10, candidates.length))
+        .slice(0, Math.min(15, candidates.length))
         .sort((a, b) => {
           const diff = (a.review_count ?? 0) - (b.review_count ?? 0);
           return diff !== 0 ? diff : Math.random() - 0.5;
         })
         .slice(0, 5);
 
-      // Remember only this batch (not cumulative) to avoid repeats next time
+      // Track this batch to avoid repeating next time
       usedExerciseWordIds.current = new Set(selectedWords.map(w => w.id));
       
       const wordListStr = selectedWords.map(w => w.word).join(', ');
