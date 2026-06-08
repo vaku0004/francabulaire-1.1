@@ -392,10 +392,10 @@ Règles importantes :
     if (!gender || gender === 'none') return word;
     const trimmed = word.trim();
     const lower = trimmed.toLowerCase();
+    // Don't add article to phrases (multiple words) or verb forms
+    if (trimmed.includes(' ')) return word;
     const articles = ['le ', 'la ', 'les ', "l'", 'un ', 'une ', 'des '];
-    if (articles.some(article => lower.startsWith(article))) {
-      return word;
-    }
+    if (articles.some(article => lower.startsWith(article))) return word;
     if (isPlural) return `les ${trimmed}`;
     const firstChar = lower[0];
     const isVowel = ['a', 'e', 'i', 'o', 'u', 'y', 'é', 'è', 'ê', 'ë', 'à', 'â', 'î', 'ï', 'ô', 'û', 'ù'].includes(firstChar);
