@@ -2437,7 +2437,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                       </p>
                     </div>
                     <button 
-                      onClick={generateStoryExercise}
+                      onClick={() => generateStoryExercise()}
                       className="px-8 py-4 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 flex items-center gap-2 mx-auto"
                     >
                       <Sparkles size={18} />
@@ -2586,7 +2586,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
                   <div className="flex items-center gap-3 pt-1">
                     <button
-                      onClick={generateStoryExercise}
+                      onClick={() => generateStoryExercise()}
                       className="p-3 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all flex-shrink-0"
                       title="Nouvelles phrases"
                     >
@@ -2599,7 +2599,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                           key="new"
                           initial={{ opacity: 0, scale: 0.95 }}
                           animate={{ opacity: 1, scale: 1 }}
-                          onClick={generateStoryExercise}
+                          onClick={() => generateStoryExercise()}
                           className="flex-1 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
                         >
                           <Sparkles size={16} />
