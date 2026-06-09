@@ -94,8 +94,9 @@ function extractJson(response: any): string {
 }
 
 export default function App() {
-  // Ref declared at the very top so generateStoryExercise can reliably access it
+  // Refs declared at the very top so generateStoryExercise can reliably access them
   const usedExerciseWordIds = React.useRef<Set<string>>(new Set());
+  const batchWrongWordIds = React.useRef<Set<string>>(new Set());
 
   const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
@@ -151,10 +152,12 @@ export default function App() {
   const currentGuide = (installGuideContent as any)[targetLanguage] || installGuideContent.Russe;
 
   const generateStoryExercise = async (queue?: Word[]) => {
+    if (isStoryLoading) return; // guard against double click
     setIsStoryLoading(true);
     setExerciseFeedback(null);
     setUserAnswers([]);
     setWordHintIndex(null);
+    batchWrongWordIds.current.clear();
 
     try {
       const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
@@ -170,11 +173,8 @@ export default function App() {
         return;
       }
 
-      // Take first 5 from the session queue
+      // Take first 5 from the session queue (queue is consumed only after a successful AI response)
       const selectedWords = currentQueue.slice(0, 5);
-      // Remove them from queue; they'll be re-added after verification
-      setExerciseSessionQueue(currentQueue.slice(5));
-      setCurrentExerciseBatch(selectedWords);
 
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
@@ -202,15 +202,21 @@ Règles importantes :
       });
 
       const result = JSON.parse(extractJson(response) || '{}');
-      if (result.story && result.gaps) {
+      if (result.story && Array.isArray(result.gaps) && result.gaps.length > 0) {
+        // Consume the queue only now that generation succeeded
+        setExerciseSessionQueue(currentQueue.slice(5));
+        setCurrentExerciseBatch(selectedWords);
         setGeneratedStory({
           ...result,
           shuffledGaps: [...result.gaps].sort(() => Math.random() - 0.5)
         });
         setUserAnswers(new Array(result.gaps.length).fill(''));
+      } else {
+        alert("La génération a échoué, réessayez.");
       }
     } catch (error) {
       console.error("Error generating story:", error);
+      alert("Erreur de génération. Vérifiez votre connexion et réessayez.");
     } finally {
       setIsStoryLoading(false);
     }
@@ -2614,21 +2620,28 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                             const isCorrect = userAnswers.every((ans, i) => ans === generatedStory.gaps[i]);
                             setExerciseFeedback(isCorrect ? 'success' : 'error');
 
-                            // Update session queue: wrong words back to front, correct to end
-                            const wrongWords: Word[] = [];
-                            const correctWords: Word[] = [];
+                            // Match batch words to gaps tolerantly (AI may add articles or change case)
+                            const matchWord = (gap: string) => currentExerciseBatch.find(w => {
+                              const a = normalizeWord(stripArticles(w.word));
+                              const b = normalizeWord(stripArticles(gap));
+                              return a === b || a.includes(b) || b.includes(a);
+                            });
+
+                            // Remember words answered wrong at least once in this batch
                             generatedStory.gaps.forEach((gap, i) => {
-                              const word = currentExerciseBatch.find(w =>
-                                w.word.toLowerCase() === gap.toLowerCase()
-                              );
-                              if (!word) return;
-                              if (userAnswers[i] === gap) {
-                                correctWords.push(word);
-                              } else {
-                                wrongWords.push(word);
+                              if (userAnswers[i] !== gap) {
+                                const w = matchWord(gap);
+                                if (w) batchWrongWordIds.current.add(w.id);
                               }
                             });
-                            setExerciseSessionQueue(prev => [...wrongWords, ...prev, ...correctWords]);
+
+                            // Commit queue update once, when the batch is fully solved
+                            if (isCorrect) {
+                              const wrongWords = currentExerciseBatch.filter(w => batchWrongWordIds.current.has(w.id));
+                              const okWords = currentExerciseBatch.filter(w => !batchWrongWordIds.current.has(w.id));
+                              setExerciseSessionQueue(prev => [...wrongWords, ...prev, ...okWords]);
+                              batchWrongWordIds.current.clear();
+                            }
                           }}
                           className="flex-1 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
                         >
