@@ -150,73 +150,32 @@ export default function App() {
 
   const currentGuide = (installGuideContent as any)[targetLanguage] || installGuideContent.Russe;
 
-  const generateStoryExercise = async () => {
+  const generateStoryExercise = async (queue?: Word[]) => {
     setIsStoryLoading(true);
     setExerciseFeedback(null);
     setUserAnswers([]);
     setWordHintIndex(null);
-    
+
     try {
       const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("Clé API не найдена.");
-      }
+      if (!apiKey) throw new Error("Clé API не найдена.");
       const ai = new GoogleGenAI({ apiKey });
 
-      // Helper: sort reviewed words by priority (struggling first)
-      const sortByPriority = (arr: typeof words) =>
-        [...arr].sort((a, b) => {
-          const diff = (a.review_count ?? 0) - (b.review_count ?? 0);
-          return diff !== 0 ? diff : (a.next_review_at ?? 0) - (b.next_review_at ?? 0);
-        });
+      // Use provided queue or current exerciseSessionQueue
+      const currentQueue = queue ?? exerciseSessionQueue;
 
-      const matchesLang = (w: typeof words[0]) =>
-        targetLanguage === 'Russe'
-          ? (!w.target_lang || w.target_lang === 'Russe')
-          : w.target_lang === targetLanguage;
-
-      // Primary pool: reviewed, not mastered — highest priority
-      const primaryPool = sortByPriority(
-        words.filter(w => matchesLang(w) && (w.review_count ?? 0) > 0 && w.status !== 'mastered')
-      );
-
-      // Extended pool: include mastered words as fallback for variety
-      const extendedPool = sortByPriority(
-        words.filter(w => matchesLang(w) && (w.review_count ?? 0) > 0)
-      );
-
-      const pool = extendedPool.length >= 5 ? extendedPool : [];
-
-      if (pool.length < 5) {
+      if (currentQueue.length < 5) {
         alert("Il vous faut au moins 5 mots révisés en mode cartes pour générer un exercice. Révisez d'abord quelques mots !");
         setIsStoryLoading(false);
         return;
       }
 
-      // Exclude last batch; if not enough fresh words, reset tracking
-      let candidates = pool.filter(w => !usedExerciseWordIds.current.has(w.id));
-      if (candidates.length < 5) {
-        usedExerciseWordIds.current = new Set();
-        // Prefer primary (non-mastered) first, then mastered as padding
-        candidates = [
-          ...primaryPool.filter(w => !usedExerciseWordIds.current.has(w.id)),
-          ...extendedPool.filter(w => w.status === 'mastered' && !usedExerciseWordIds.current.has(w.id)),
-        ];
-        if (candidates.length < 5) candidates = pool;
-      }
+      // Take first 5 from the session queue
+      const selectedWords = currentQueue.slice(0, 5);
+      // Remove them from queue; they'll be re-added after verification
+      setExerciseSessionQueue(currentQueue.slice(5));
+      setCurrentExerciseBatch(selectedWords);
 
-      // Pick top 5: priority sorted, shuffle within same review_count tier
-      const selectedWords = candidates
-        .slice(0, Math.min(15, candidates.length))
-        .sort((a, b) => {
-          const diff = (a.review_count ?? 0) - (b.review_count ?? 0);
-          return diff !== 0 ? diff : Math.random() - 0.5;
-        })
-        .slice(0, 5);
-
-      // Track this batch to avoid repeating next time
-      usedExerciseWordIds.current = new Set(selectedWords.map(w => w.id));
-      
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
       const response = await generateWithFallback(ai, {
@@ -431,6 +390,9 @@ Règles importantes :
   const [isWordListModalOpen, setIsWordListModalOpen] = useState(false);
   const [isTextExerciseModalOpen, setIsTextExerciseModalOpen] = useState(false);
   const [isMatchModalOpen, setIsMatchModalOpen] = useState(false);
+  // Exercise session queue: all reviewed words in priority order
+  const [exerciseSessionQueue, setExerciseSessionQueue] = useState<Word[]>([]);
+  const [currentExerciseBatch, setCurrentExerciseBatch] = useState<Word[]>([]);
   const [wordListSearchQuery, setWordListSearchQuery] = useState('');
   const [isStoryLoading, setIsStoryLoading] = useState(false);
   const [generatedStory, setGeneratedStory] = useState<{
@@ -2447,7 +2409,11 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   </div>
                   <div>
                     <h3 className="text-xl font-bold text-slate-900">Phrases à compléter</h3>
-                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Devinez le mot manquant dans chaque phrase</p>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                      {exerciseSessionQueue.length + (currentExerciseBatch.length > 0 ? currentExerciseBatch.length : 0) > 0
+                        ? `${exerciseSessionQueue.length} mots restants`
+                        : 'Devinez le mot manquant dans chaque phrase'}
+                    </p>
                   </div>
                 </div>
                 <button 
@@ -2647,6 +2613,22 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                           onClick={() => {
                             const isCorrect = userAnswers.every((ans, i) => ans === generatedStory.gaps[i]);
                             setExerciseFeedback(isCorrect ? 'success' : 'error');
+
+                            // Update session queue: wrong words back to front, correct to end
+                            const wrongWords: Word[] = [];
+                            const correctWords: Word[] = [];
+                            generatedStory.gaps.forEach((gap, i) => {
+                              const word = currentExerciseBatch.find(w =>
+                                w.word.toLowerCase() === gap.toLowerCase()
+                              );
+                              if (!word) return;
+                              if (userAnswers[i] === gap) {
+                                correctWords.push(word);
+                              } else {
+                                wrongWords.push(word);
+                              }
+                            });
+                            setExerciseSessionQueue(prev => [...wrongWords, ...prev, ...correctWords]);
                           }}
                           className="flex-1 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
                         >
@@ -2862,8 +2844,29 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
             >
               <Grid2X2 size={24} />
             </button>
-            <button 
-              onClick={() => setIsTextExerciseModalOpen(true)}
+            <button
+              onClick={() => {
+                // Build priority queue of all reviewed words for this session
+                const queue = words
+                  .filter(w => {
+                    const ml = targetLanguage === 'Russe'
+                      ? (!w.target_lang || w.target_lang === 'Russe')
+                      : w.target_lang === targetLanguage;
+                    return ml && (w.review_count ?? 0) > 0;
+                  })
+                  .sort((a, b) => {
+                    // Forgotten/struggling first (low review_count), mastered last
+                    const aScore = (a.status === 'mastered' ? 100 : 0) + (a.review_count ?? 0);
+                    const bScore = (b.status === 'mastered' ? 100 : 0) + (b.review_count ?? 0);
+                    return aScore - bScore;
+                  });
+                setExerciseSessionQueue(queue);
+                setCurrentExerciseBatch([]);
+                setGeneratedStory(null);
+                setExerciseFeedback(null);
+                setUserAnswers([]);
+                setIsTextExerciseModalOpen(true);
+              }}
               className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center hover:bg-indigo-100 transition-all border-2 border-indigo-100 shadow-sm active:scale-95"
               title="Exercice de texte"
             >
