@@ -94,8 +94,7 @@ function extractJson(response: any): string {
 }
 
 export default function App() {
-  // Refs declared at the very top so generateStoryExercise can reliably access them
-  const usedExerciseWordIds = React.useRef<Set<string>>(new Set());
+  // Ref declared at the very top so generateStoryExercise can reliably access it
   const batchWrongWordIds = React.useRef<Set<string>>(new Set());
 
   const [user, setUser] = useState<User | null>(null);
@@ -382,6 +381,7 @@ Règles importantes :
   };
 
   const [isReviewing, setIsReviewing] = useState(false);
+  const [reviewPaused, setReviewPaused] = useState(false);
   const [sessionQueue, setSessionQueue] = useState<Word[]>([]);
   const [currentReviewIndex, setCurrentReviewIndex] = useState(0);
   const [showTranslation, setShowTranslation] = useState(false);
@@ -796,10 +796,11 @@ Règles importantes :
     setIsReviewing(true);
   };
 
-  const stopReview = () => {
+  const stopReview = (pausedByUser = false) => {
     setIsReviewing(false);
     setSessionQueue([]);
     setCurrentReviewIndex(0);
+    setReviewPaused(pausedByUser);
   };
 
   const todayDate = useMemo(() => {
@@ -849,7 +850,9 @@ Règles importantes :
     setError(null);
     setSuggestions([]);
 
+    let timedOut = false;
     const timeoutId = setTimeout(() => {
+      timedOut = true;
       setIsSearching(false);
       setError(`Le mot "${trimmedQuery}" n'a pas été trouvé.`);
     }, 30000);
@@ -881,6 +884,8 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
         config: {}
       });
       const result = JSON.parse(extractJson(response) || '{}');
+
+      if (timedOut) return; // error already shown, don't silently add the word
 
       if (result.found && result.frenchWord && result.translation) {
         const finalWord = result.frenchWord;
@@ -970,7 +975,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
   // Auto-start review if words are due, or refresh if language changes
   useEffect(() => {
-    if (reviewQueue.length > 0 && !isReviewing) {
+    if (reviewQueue.length > 0 && !isReviewing && !reviewPaused) {
       startReview();
     } else if (isReviewing && sessionQueue.length > 0) {
       // If language changed while in review, we might want to refresh the queue
@@ -986,7 +991,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
         if (reviewQueue.length === 0) setIsReviewing(false);
       }
     }
-  }, [reviewQueue, isReviewing, targetLanguage, sessionQueue.length]);
+  }, [reviewQueue, isReviewing, reviewPaused, targetLanguage, sessionQueue.length]);
 
   const handleReview = (grade: ReviewGrade) => {
     if (!currentWord || !isReviewing) return;
@@ -1071,7 +1076,11 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
       const result = JSON.parse(extractJson(response) || '[]');
       if (Array.isArray(result) && result.length > 0) {
-        const newWords: Word[] = result.map(item => ({
+        const validItems = result.filter(item =>
+          item && typeof item.word === 'string' && item.word.trim() &&
+          typeof item.translation === 'string' && item.translation.trim()
+        );
+        const newWords: Word[] = validItems.map(item => ({
           id: crypto.randomUUID(),
           word: item.word.trim(),
           translation: item.translation.trim(),
@@ -1112,6 +1121,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = ''; // reset so the same file can be selected again
     if (!file) return;
 
     const fileType = file.name.split('.').pop()?.toLowerCase();
@@ -1412,8 +1422,8 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
                     {currentReviewIndex + 1} / {sessionQueue.length}
                   </span>
-                  <button 
-                    onClick={stopReview}
+                  <button
+                    onClick={() => stopReview(true)}
                     className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold uppercase tracking-tight hover:bg-slate-200 transition-colors"
                   >
                     Arrêter
@@ -1455,11 +1465,20 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <div>
                       <h3 className="text-xl font-bold text-slate-800">Prêt pour aujourd'hui ?</h3>
                       <p className="text-slate-500 max-w-xs mx-auto mt-2">
-                        {reviewQueue.length > 0 
+                        {reviewQueue.length > 0
                           ? `Vous avez ${reviewQueue.length} mots qui attendent d'être révisés.`
                           : "Excellent ! Vous avez révisé tous vos mots pour le moment."}
                       </p>
                     </div>
+                    {reviewPaused && reviewQueue.length > 0 && (
+                      <button
+                        onClick={() => setReviewPaused(false)}
+                        className="px-8 py-3 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 flex items-center gap-2 mx-auto"
+                      >
+                        <RotateCcw size={16} />
+                        Reprendre la révision
+                      </button>
+                    )}
                   </motion.div>
                 ) : (
                   <motion.div 
@@ -2381,13 +2400,18 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                       setSearchQuery('');
                     }
 
-                    // Handle review session if active
-                    if (isReviewing && currentWord && currentWord.id === idToRemove) {
-                      setShowTranslation(false);
-                      if (currentReviewIndex + 1 < sessionQueue.length) {
-                        setCurrentReviewIndex(prev => prev + 1);
-                      } else {
-                        stopReview();
+                    // Remove the word from the active review session too
+                    if (isReviewing) {
+                      const idx = sessionQueue.findIndex(w => w.id === idToRemove);
+                      if (idx !== -1) {
+                        const next = sessionQueue.filter(w => w.id !== idToRemove);
+                        if (next.length === 0) {
+                          stopReview();
+                        } else {
+                          setSessionQueue(next);
+                          setCurrentReviewIndex(ci => Math.min(idx < ci ? ci - 1 : ci, next.length - 1));
+                          setShowTranslation(false);
+                        }
                       }
                     }
                   }}
