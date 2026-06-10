@@ -96,8 +96,10 @@ function extractJson(response: any): string {
 }
 
 export default function App() {
-  // Ref declared at the very top so generateStoryExercise can reliably access it
+  // Refs declared at the very top so exercise functions can reliably access them
   const batchWrongWordIds = React.useRef<Set<string>>(new Set());
+  const matchWrongWordIds = React.useRef<Set<string>>(new Set());
+  const matchCommitted = React.useRef(false);
 
   const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
@@ -431,38 +433,57 @@ Règles importantes :
   const [isProcessingMatch, setIsProcessingMatch] = useState(false);
 
   const startMatchGame = useCallback(() => {
-    // Filter words for current language, having translations, NOT mastered, and already reviewed at least once
-    const availableWords = words.filter(w => {
+    // Shared exercise queue: same priority queue as the fill-in-the-blank exercise
+    const eligible = words.filter(w => {
       const matchesLang = targetLanguage === 'Russe'
         ? (!w.target_lang || w.target_lang === 'Russe')
         : (w.target_lang === targetLanguage);
-      return matchesLang && w.word && w.translation && w.status !== 'mastered' && !!w.last_reviewed_at;
+      return matchesLang && w.word && w.translation && !!w.last_reviewed_at;
     });
+    const byPriority = (a: Word, b: Word) => {
+      const aScore = (a.status === 'mastered' ? 100 : 0) + (a.review_count ?? 0);
+      const bScore = (b.status === 'mastered' ? 100 : 0) + (b.review_count ?? 0);
+      return aScore - bScore;
+    };
 
-    if (availableWords.length < 5) {
+    // Rebuild queue only when exhausted, otherwise append newly eligible words
+    let queue = exerciseSessionQueue;
+    if (queue.length === 0 && currentExerciseBatch.length === 0) {
+      queue = [...eligible].sort(byPriority);
+    } else {
+      const known = new Set([...queue.map(w => w.id), ...currentExerciseBatch.map(w => w.id)]);
+      const additions = eligible.filter(w => !known.has(w.id)).sort(byPriority);
+      if (additions.length > 0) queue = [...queue, ...additions];
+    }
+
+    // Pool = next words from the queue that have translations
+    const poolCandidates = queue.filter(w => w.word && w.translation);
+    if (poolCandidates.length < 5) {
       alert("Il faut au moins 5 mots révisés en mode cartes pour jouer. Révisez d'abord quelques mots !");
       return;
     }
+    const pool = poolCandidates.slice(0, Math.min(10, poolCandidates.length));
+    const poolIds = new Set(pool.map(w => w.id));
+    setExerciseSessionQueue(queue.filter(w => !poolIds.has(w.id)));
 
-    // Pick 20 words or all available if less than 20
-    const poolSize = Math.min(availableWords.length, 20);
-    const shuffledPool = [...availableWords].sort(() => Math.random() - 0.5).slice(0, poolSize);
-    
-    setMatchPool(shuffledPool);
+    matchWrongWordIds.current = new Set();
+    matchCommitted.current = false;
+
+    setMatchPool(pool);
     setMatchedIds(new Set());
-    
-    const initialWords = shuffledPool.slice(0, 5);
-    setCurrentMatchWords(initialWords);
-    
+
+    const initialWords = pool.slice(0, 5);
+    setCurrentMatchWords([...initialWords].sort(() => Math.random() - 0.5));
+
     const initialTranslations = initialWords.map(w => ({ id: w.id, text: w.translation })).sort(() => Math.random() - 0.5);
     setShuffledTranslations(initialTranslations);
-    
+
     setSelectedWordId(null);
     setSelectedTranslationId(null);
     setSuccessfullyMatched(null);
     setWrongMatch(null);
     setIsMatchModalOpen(true);
-  }, [words, targetLanguage]);
+  }, [words, targetLanguage, exerciseSessionQueue, currentExerciseBatch]);
 
   useEffect(() => {
     if (selectedWordId && selectedTranslationId && !isProcessingMatch) {
@@ -471,8 +492,19 @@ Règles importantes :
         setIsProcessingMatch(true);
         const matchedId = selectedWordId;
         setSuccessfullyMatched(matchedId);
-        
+
         setTimeout(() => {
+          // If this was the last pair — commit results to the shared queue:
+          // words with errors go to the front, clean ones to the end
+          const newSize = matchedIds.has(matchedId) ? matchedIds.size : matchedIds.size + 1;
+          if (newSize === matchPool.length && !matchCommitted.current) {
+            matchCommitted.current = true;
+            const wrongWords = matchPool.filter(w => matchWrongWordIds.current.has(w.id));
+            const okWords = matchPool.filter(w => !matchWrongWordIds.current.has(w.id));
+            setExerciseSessionQueue(prev => [...wrongWords, ...prev, ...okWords]);
+            matchWrongWordIds.current.clear();
+          }
+
           setMatchedIds(prev => {
             const next = new Set(prev);
             next.add(matchedId);
@@ -527,7 +559,8 @@ Règles importantes :
           setIsProcessingMatch(false);
         }, 1500); 
       } else {
-        // WRONG
+        // WRONG — flag the word whose translation the user failed to pick
+        matchWrongWordIds.current.add(selectedWordId);
         setIsProcessingMatch(true);
         setWrongMatch({ wordId: selectedWordId, transId: selectedTranslationId });
         setTimeout(() => {
@@ -2744,8 +2777,19 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Associez les mots et leurs traductions</p>
                   </div>
                 </div>
-                <button 
-                  onClick={() => setIsMatchModalOpen(false)}
+                <button
+                  onClick={() => {
+                    // Mid-game close: return unfinished words to the queue
+                    if (matchPool.length > 0 && matchedIds.size < matchPool.length && !matchCommitted.current) {
+                      const unmatched = matchPool.filter(w => !matchedIds.has(w.id));
+                      const doneWrong = matchPool.filter(w => matchedIds.has(w.id) && matchWrongWordIds.current.has(w.id));
+                      const doneOk = matchPool.filter(w => matchedIds.has(w.id) && !matchWrongWordIds.current.has(w.id));
+                      setExerciseSessionQueue(prev => [...unmatched, ...doneWrong, ...prev, ...doneOk]);
+                      matchWrongWordIds.current.clear();
+                    }
+                    setMatchPool([]);
+                    setIsMatchModalOpen(false);
+                  }}
                   className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
                 >
                   <X size={20} />
