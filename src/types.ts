@@ -15,6 +15,7 @@ export interface Word {
   status: 'new' | 'learning' | 'mastered';
   review_count: number;
   last_reviewed_at?: number;
+  first_reviewed_at?: number;
 }
 
 export type ReviewGrade = 'remembered' | 'almost' | 'forgotten';

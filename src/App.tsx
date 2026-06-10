@@ -50,6 +50,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLi
 
 const STORAGE_KEY = 'mon_francais_vocab';
 const REVIEW_INTERVALS = [1, 3, 7, 14, 30]; // Spaced repetition intervals in days
+const DAILY_REVIEW_LIMIT = 50; // Max cards per day
+const DAILY_NEW_LIMIT = 15;    // Max brand-new words introduced per day
 
 const FALLBACK_MODELS = [
   "gemini-3.1-flash-lite",
@@ -431,7 +433,7 @@ Règles importantes :
       const matchesLang = targetLanguage === 'Russe'
         ? (!w.target_lang || w.target_lang === 'Russe')
         : (w.target_lang === targetLanguage);
-      return matchesLang && w.word && w.translation && w.status !== 'mastered' && (w.review_count ?? 0) > 0;
+      return matchesLang && w.word && w.translation && w.status !== 'mastered' && !!w.last_reviewed_at;
     });
 
     if (availableWords.length < 5) {
@@ -743,23 +745,50 @@ Règles importantes :
     }
   };
 
-  // Filter words for review — sorted by priority: forgotten first, then almost, then remembered
+  // Daily review queue with limits:
+  // - max DAILY_REVIEW_LIMIT cards per day, of which max DAILY_NEW_LIMIT brand-new words
+  // - overdue reviews of seen words have priority over new words
+  // - words marked "forgotten" today come back the same day WITHOUT consuming the limit
   const reviewQueue = useMemo(() => {
     const now = Date.now();
-    return words
-      .filter(w => {
-        const matchesLang = targetLanguage === 'Russe'
-          ? (!w.target_lang || w.target_lang === 'Russe')
-          : (w.target_lang === targetLanguage);
-        return matchesLang && w.status !== 'mastered' && w.next_review_at <= now;
-      })
-      .sort((a, b) => {
-        // Lower review_count = more forgotten = higher priority
-        const diff = (a.review_count ?? 0) - (b.review_count ?? 0);
-        if (diff !== 0) return diff;
-        // Among same level: earlier due date first
-        return a.next_review_at - b.next_review_at;
-      });
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const todayTs = startOfToday.getTime();
+
+    const matchesLang = (w: Word) => targetLanguage === 'Russe'
+      ? (!w.target_lang || w.target_lang === 'Russe')
+      : (w.target_lang === targetLanguage);
+
+    const due = words.filter(w => matchesLang(w) && w.status !== 'mastered' && w.next_review_at <= now);
+
+    // Lower review_count = more forgotten = higher priority; then earlier due date
+    const byPriority = (a: Word, b: Word) => {
+      const diff = (a.review_count ?? 0) - (b.review_count ?? 0);
+      return diff !== 0 ? diff : a.next_review_at - b.next_review_at;
+    };
+
+    // Same-day retries ("forgotten" earlier today, due again in 1h) — bypass the daily limit
+    const retries = due.filter(w => w.last_reviewed_at && w.last_reviewed_at >= todayTs).sort(byPriority);
+    // Seen words due for a scheduled review
+    const seenDue = due.filter(w => w.last_reviewed_at && w.last_reviewed_at < todayTs).sort(byPriority);
+    // Brand-new words never shown before (oldest added first)
+    const newWords = due.filter(w => !w.last_reviewed_at).sort((a, b) => a.created_at - b.created_at);
+
+    const reviewedToday = words.filter(w => matchesLang(w) && w.last_reviewed_at && w.last_reviewed_at >= todayTs).length;
+    const newIntroducedToday = words.filter(w => matchesLang(w) && w.first_reviewed_at && w.first_reviewed_at >= todayTs).length;
+
+    let budget = Math.max(0, DAILY_REVIEW_LIMIT - reviewedToday);
+
+    const queue: Word[] = [...retries];
+
+    const seenTake = seenDue.slice(0, budget);
+    queue.push(...seenTake);
+    budget -= seenTake.length;
+
+    const newBudget = Math.min(budget, Math.max(0, DAILY_NEW_LIMIT - newIntroducedToday));
+    queue.push(...newWords.slice(0, newBudget));
+
+    return queue;
   }, [words, isReviewing, targetLanguage]);
 
   const currentWord = sessionQueue[currentReviewIndex];
@@ -770,12 +799,13 @@ Règles importantes :
     const timestamp = startOfToday.getTime();
 
     const reviewedToday = words.filter(w => {
-      const matchesLang = targetLanguage === 'Russe' 
+      const matchesLang = targetLanguage === 'Russe'
         ? (!w.target_lang || w.target_lang === 'Russe')
         : (w.target_lang === targetLanguage);
       return matchesLang && w.last_reviewed_at && w.last_reviewed_at >= timestamp;
     }).length;
-    const dueToday = reviewQueue.length;
+    // Don't double-count same-day retries (already in reviewedToday)
+    const dueToday = reviewQueue.filter(w => !(w.last_reviewed_at && w.last_reviewed_at >= timestamp)).length;
     const totalToday = reviewedToday + dueToday;
     const progress = totalToday > 0 ? (reviewedToday / totalToday) * 100 : 0;
 
@@ -1036,7 +1066,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
           setTimeout(() => setJustMastered(null), 3000);
         }
 
-        return { ...w, next_review_at: nextReview, status, review_count: reviewCount, last_reviewed_at: Date.now() };
+        return { ...w, next_review_at: nextReview, status, review_count: reviewCount, last_reviewed_at: Date.now(), first_reviewed_at: w.first_reviewed_at ?? Date.now() };
       }
       return w;
     });
@@ -2889,7 +2919,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     const ml = targetLanguage === 'Russe'
                       ? (!w.target_lang || w.target_lang === 'Russe')
                       : w.target_lang === targetLanguage;
-                    return ml && (w.review_count ?? 0) > 0;
+                    return ml && !!w.last_reviewed_at;
                   })
                   .sort((a, b) => {
                     // Forgotten/struggling first (low review_count), mastered last
