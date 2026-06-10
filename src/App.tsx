@@ -165,8 +165,11 @@ export default function App() {
       if (!apiKey) throw new Error("Clé API не найдена.");
       const ai = new GoogleGenAI({ apiKey });
 
-      // Use provided queue or current exerciseSessionQueue
-      const currentQueue = queue ?? exerciseSessionQueue;
+      // Use provided queue or current exerciseSessionQueue.
+      // If the previous batch was skipped without being solved, put its words back at the end.
+      const baseQueue = queue ?? exerciseSessionQueue;
+      const skipped = currentExerciseBatch.filter(w => !baseQueue.some(q => q.id === w.id));
+      const currentQueue = [...baseQueue, ...skipped];
 
       if (currentQueue.length < 5) {
         alert("Il vous faut au moins 5 mots révisés en mode cartes pour générer un exercice. Révisez d'abord quelques mots !");
@@ -2681,9 +2684,9 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                               return a === b || a.includes(b) || b.includes(a);
                             });
 
-                            // Remember words answered wrong at least once in this batch
+                            // Remember words actually answered wrong (empty gap = not attempted, not an error)
                             generatedStory.gaps.forEach((gap, i) => {
-                              if (userAnswers[i] !== gap) {
+                              if (userAnswers[i] && userAnswers[i] !== gap) {
                                 const w = matchWord(gap);
                                 if (w) batchWrongWordIds.current.add(w.id);
                               }
@@ -2695,6 +2698,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                               const okWords = currentExerciseBatch.filter(w => !batchWrongWordIds.current.has(w.id));
                               setExerciseSessionQueue(prev => [...wrongWords, ...prev, ...okWords]);
                               batchWrongWordIds.current.clear();
+                              setCurrentExerciseBatch([]);
                             }
                           }}
                           className="flex-1 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
@@ -2913,25 +2917,28 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
             </button>
             <button
               onClick={() => {
-                // Build priority queue of all reviewed words for this session
-                const queue = words
-                  .filter(w => {
-                    const ml = targetLanguage === 'Russe'
-                      ? (!w.target_lang || w.target_lang === 'Russe')
-                      : w.target_lang === targetLanguage;
-                    return ml && !!w.last_reviewed_at;
-                  })
-                  .sort((a, b) => {
-                    // Forgotten/struggling first (low review_count), mastered last
-                    const aScore = (a.status === 'mastered' ? 100 : 0) + (a.review_count ?? 0);
-                    const bScore = (b.status === 'mastered' ? 100 : 0) + (b.review_count ?? 0);
-                    return aScore - bScore;
-                  });
-                setExerciseSessionQueue(queue);
-                setCurrentExerciseBatch([]);
-                setGeneratedStory(null);
-                setExerciseFeedback(null);
-                setUserAnswers([]);
+                const eligible = words.filter(w => {
+                  const ml = targetLanguage === 'Russe'
+                    ? (!w.target_lang || w.target_lang === 'Russe')
+                    : w.target_lang === targetLanguage;
+                  return ml && !!w.last_reviewed_at;
+                });
+                const byPriority = (a: Word, b: Word) => {
+                  // Forgotten/struggling first (low review_count), mastered last
+                  const aScore = (a.status === 'mastered' ? 100 : 0) + (a.review_count ?? 0);
+                  const bScore = (b.status === 'mastered' ? 100 : 0) + (b.review_count ?? 0);
+                  return aScore - bScore;
+                };
+                // Persist queue progress across modal opens:
+                // rebuild only when exhausted, otherwise just append newly eligible words
+                setExerciseSessionQueue(prev => {
+                  if (prev.length === 0 && currentExerciseBatch.length === 0) {
+                    return [...eligible].sort(byPriority);
+                  }
+                  const known = new Set([...prev.map(w => w.id), ...currentExerciseBatch.map(w => w.id)]);
+                  const additions = eligible.filter(w => !known.has(w.id)).sort(byPriority);
+                  return additions.length > 0 ? [...prev, ...additions] : prev;
+                });
                 setIsTextExerciseModalOpen(true);
               }}
               className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center hover:bg-indigo-100 transition-all border-2 border-indigo-100 shadow-sm active:scale-95"
