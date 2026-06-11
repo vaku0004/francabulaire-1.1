@@ -195,7 +195,7 @@ Mots : ${wordListStr}
 Retourne UNIQUEMENT un objet JSON (sans markdown) :
 {
   "title": "Complétez les phrases",
-  "story": "Phrase 1 avec {{0}}.\nPhrase 2 avec {{1}}.\nPhrase 3 avec {{2}}.",
+  "sentences": ["Première phrase avec {{0}}.", "Deuxième phrase avec {{1}}.", "Troisième phrase avec {{2}}."],
   "gaps": ["mot0", "mot1", "mot2"]
 }
 
@@ -203,17 +203,36 @@ Règles importantes :
 - Le marqueur {{N}} correspond exactement à gaps[N]
 - Une seule phrase par mot, une seule lacune par phrase
 - Le contexte autour du trou doit clairement indiquer quel mot manque
-- Les phrases ne doivent PAS être liées entre elles`,
+- Les phrases ne doivent PAS être liées entre elles
+- Chaque phrase est un élément séparé du tableau "sentences"`,
         config: {}
       });
 
-      const result = JSON.parse(extractJson(response) || '{}');
-      if (result.story && Array.isArray(result.gaps) && result.gaps.length > 0) {
+      const raw = extractJson(response) || '{}';
+      let result: any;
+      try {
+        result = JSON.parse(raw);
+      } catch {
+        // Repair common AI JSON issues: raw newlines inside strings, trailing commas
+        const repaired = raw
+          .replace(/"(?:[^"\\]|\\.)*"/g, (m) => m.replace(/\r/g, '').replace(/\n/g, '\\n'))
+          .replace(/,\s*([}\]])/g, '$1');
+        try { result = JSON.parse(repaired); } catch { result = {}; }
+      }
+
+      // Support both formats: "sentences" array (preferred) or legacy "story" string
+      const story = Array.isArray(result.sentences) && result.sentences.length > 0
+        ? result.sentences.join('\n')
+        : result.story;
+
+      if (story && Array.isArray(result.gaps) && result.gaps.length > 0) {
         // Consume the queue only now that generation succeeded
         setExerciseSessionQueue(currentQueue.slice(5));
         setCurrentExerciseBatch(selectedWords);
         setGeneratedStory({
-          ...result,
+          title: result.title || 'Complétez les phrases',
+          story,
+          gaps: result.gaps,
           shuffledGaps: [...result.gaps].sort(() => Math.random() - 0.5)
         });
         setUserAnswers(new Array(result.gaps.length).fill(''));
