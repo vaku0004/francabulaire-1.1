@@ -800,10 +800,11 @@ Règles importantes :
     }
   };
 
-  // Daily review queue with limits:
-  // - max DAILY_REVIEW_LIMIT cards per day, of which max DAILY_NEW_LIMIT brand-new words
-  // - overdue reviews of seen words have priority over new words
-  // - words marked "forgotten" today come back the same day WITHOUT consuming the limit
+  // Daily review queue with a single shared limit:
+  // - max DAILY_REVIEW_LIMIT cards per day (retries + scheduled reviews + new words all share it)
+  // - of which max DAILY_NEW_LIMIT brand-new words
+  // - retries ("forgotten" earlier today) get top priority but still count toward the limit,
+  //   so the queue length always matches the remaining daily budget shown in the nav bar
   const reviewQueue = useMemo(() => {
     const now = Date.now();
     const startOfToday = new Date();
@@ -822,7 +823,7 @@ Règles importantes :
       return diff !== 0 ? diff : a.next_review_at - b.next_review_at;
     };
 
-    // Same-day retries ("forgotten" earlier today, due again in 1h) — bypass the daily limit
+    // Same-day retries ("forgotten" earlier today, due again in 1h) — highest priority
     const retries = due.filter(w => w.last_reviewed_at && w.last_reviewed_at >= todayTs).sort(byPriority);
     // Seen words due for a scheduled review
     const seenDue = due.filter(w => w.last_reviewed_at && w.last_reviewed_at < todayTs).sort(byPriority);
@@ -834,12 +835,19 @@ Règles importantes :
 
     let budget = Math.max(0, DAILY_REVIEW_LIMIT - reviewedToday);
 
-    const queue: Word[] = [...retries];
+    const queue: Word[] = [];
 
+    // Retries first, within the shared budget
+    const retryTake = retries.slice(0, budget);
+    queue.push(...retryTake);
+    budget -= retryTake.length;
+
+    // Then scheduled reviews of previously seen words
     const seenTake = seenDue.slice(0, budget);
     queue.push(...seenTake);
     budget -= seenTake.length;
 
+    // Finally new words, capped by both the shared budget and the daily-new limit
     const newBudget = Math.min(budget, Math.max(0, DAILY_NEW_LIMIT - newIntroducedToday));
     queue.push(...newWords.slice(0, newBudget));
 
@@ -859,13 +867,13 @@ Règles importantes :
         : (w.target_lang === targetLanguage);
       return matchesLang && w.last_reviewed_at && w.last_reviewed_at >= timestamp;
     }).length;
-    // Don't double-count same-day retries (already in reviewedToday)
-    const dueToday = reviewQueue.filter(w => !(w.last_reviewed_at && w.last_reviewed_at >= timestamp)).length;
-    const totalToday = reviewedToday + dueToday;
+    // Total target = the daily limit, but never less than what's actually available today
+    // (reviewed today + what's still queued). Capped at DAILY_REVIEW_LIMIT so it reads "X / 50".
+    const totalToday = Math.min(DAILY_REVIEW_LIMIT, reviewedToday + reviewQueue.length);
     const progress = totalToday > 0 ? (reviewedToday / totalToday) * 100 : 0;
 
     return { reviewedToday, totalToday, progress };
-  }, [words, reviewQueue]);
+  }, [words, reviewQueue, targetLanguage]);
 
   const masteredCount = useMemo(() => words.filter(w => {
     const matchesLang = targetLanguage === 'Russe' 
