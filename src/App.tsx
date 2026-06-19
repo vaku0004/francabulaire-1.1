@@ -451,27 +451,45 @@ Règles importantes :
   const [wrongMatch, setWrongMatch] = useState<{wordId: string, transId: string} | null>(null);
   const [isProcessingMatch, setIsProcessingMatch] = useState(false);
 
-  const startMatchGame = useCallback(() => {
-    // Shared exercise queue: same priority queue as the fill-in-the-blank exercise
+  // Eligible words for the footer games, ordered for the shared exercise queue:
+  // 1. words reviewed TODAY first (the daily session), then words seen on earlier days
+  // 2. within each group: forgotten first (low review_count), then almost, then remembered, mastered last
+  const buildExerciseEligible = useCallback(() => {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const todayTs = startOfToday.getTime();
+
     const eligible = words.filter(w => {
       const matchesLang = targetLanguage === 'Russe'
         ? (!w.target_lang || w.target_lang === 'Russe')
         : (w.target_lang === targetLanguage);
       return matchesLang && w.word && w.translation && !!w.last_reviewed_at;
     });
-    const byPriority = (a: Word, b: Word) => {
-      const aScore = (a.status === 'mastered' ? 100 : 0) + (a.review_count ?? 0);
-      const bScore = (b.status === 'mastered' ? 100 : 0) + (b.review_count ?? 0);
-      return aScore - bScore;
+
+    const sortKey = (w: Word) => {
+      const reviewedToday = w.last_reviewed_at && w.last_reviewed_at >= todayTs ? 0 : 1;
+      const priority = (w.status === 'mastered' ? 100 : 0) + (w.review_count ?? 0);
+      return { reviewedToday, priority };
     };
+
+    return [...eligible].sort((a, b) => {
+      const ka = sortKey(a), kb = sortKey(b);
+      if (ka.reviewedToday !== kb.reviewedToday) return ka.reviewedToday - kb.reviewedToday;
+      return ka.priority - kb.priority;
+    });
+  }, [words, targetLanguage]);
+
+  const startMatchGame = useCallback(() => {
+    // Shared exercise queue: same ordering as the fill-in-the-blank exercise
+    const eligible = buildExerciseEligible();
 
     // Rebuild queue only when exhausted, otherwise append newly eligible words
     let queue = exerciseSessionQueue;
     if (queue.length === 0 && currentExerciseBatch.length === 0) {
-      queue = [...eligible].sort(byPriority);
+      queue = eligible;
     } else {
       const known = new Set([...queue.map(w => w.id), ...currentExerciseBatch.map(w => w.id)]);
-      const additions = eligible.filter(w => !known.has(w.id)).sort(byPriority);
+      const additions = eligible.filter(w => !known.has(w.id));
       if (additions.length > 0) queue = [...queue, ...additions];
     }
 
@@ -502,7 +520,7 @@ Règles importantes :
     setSuccessfullyMatched(null);
     setWrongMatch(null);
     setIsMatchModalOpen(true);
-  }, [words, targetLanguage, exerciseSessionQueue, currentExerciseBatch]);
+  }, [buildExerciseEligible, exerciseSessionQueue, currentExerciseBatch]);
 
   useEffect(() => {
     if (selectedWordId && selectedTranslationId && !isProcessingMatch) {
@@ -2988,26 +3006,15 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
             </button>
             <button
               onClick={() => {
-                const eligible = words.filter(w => {
-                  const ml = targetLanguage === 'Russe'
-                    ? (!w.target_lang || w.target_lang === 'Russe')
-                    : w.target_lang === targetLanguage;
-                  return ml && !!w.last_reviewed_at;
-                });
-                const byPriority = (a: Word, b: Word) => {
-                  // Forgotten/struggling first (low review_count), mastered last
-                  const aScore = (a.status === 'mastered' ? 100 : 0) + (a.review_count ?? 0);
-                  const bScore = (b.status === 'mastered' ? 100 : 0) + (b.review_count ?? 0);
-                  return aScore - bScore;
-                };
+                const eligible = buildExerciseEligible();
                 // Persist queue progress across modal opens:
                 // rebuild only when exhausted, otherwise just append newly eligible words
                 setExerciseSessionQueue(prev => {
                   if (prev.length === 0 && currentExerciseBatch.length === 0) {
-                    return [...eligible].sort(byPriority);
+                    return eligible;
                   }
                   const known = new Set([...prev.map(w => w.id), ...currentExerciseBatch.map(w => w.id)]);
-                  const additions = eligible.filter(w => !known.has(w.id)).sort(byPriority);
+                  const additions = eligible.filter(w => !known.has(w.id));
                   return additions.length > 0 ? [...prev, ...additions] : prev;
                 });
                 setIsTextExerciseModalOpen(true);
