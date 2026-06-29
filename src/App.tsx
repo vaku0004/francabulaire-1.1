@@ -185,12 +185,19 @@ export default function App() {
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
       const response = await generateWithFallback(ai, {
-        contents: `Tu es un professeur de français. Pour chaque mot de la liste, écris UNE phrase simple et naturelle en français (niveau A2-B1) où ce mot est manquant et doit être deviné grâce au contexte.
+        contents: `Tu es un professeur de français NATIF et rigoureux. Pour chaque mot de la liste, écris UNE phrase simple et naturelle en français (niveau A2-B1) où ce mot est manquant et doit être deviné grâce au contexte.
 
 Les phrases sont INDÉPENDANTES les unes des autres — pas besoin de les relier en histoire.
 Chaque phrase doit rendre le mot manquant ÉVIDENT par le contexte (situation claire, synonyme, antonyme, explication).
 
 Mots : ${wordListStr}
+
+GRAMMAIRE — la phrase complète (le trou rempli par le mot exact) doit être PARFAITEMENT correcte :
+- Vérifie l'élision : "l'" seulement devant voyelle ou h muet ; sinon "le"/"la" (ex : "le logea", PAS "l' logea").
+- Accorde les articles, déterminants, adjectifs et participes avec le genre et le nombre du mot caché.
+- Conjugue correctement les verbes ; respecte les prépositions.
+- Relis chaque phrase comme si le trou était déjà rempli : elle doit sonner naturelle pour un francophone natif.
+- Garde le mot caché à sa forme EXACTE telle qu'elle apparaît dans la liste (ne le décline pas, ne le conjugue pas).
 
 Retourne UNIQUEMENT un objet JSON (sans markdown) :
 {
