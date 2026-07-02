@@ -1145,9 +1145,13 @@ Return ONLY a raw JSON object, no markdown, no extra text:
         : `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
 If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
 
+Translation rule:
+- For a SINGLE word: give a short accurate translation (1-4 words).
+- For a PHRASE or SENTENCE: translate the WHOLE phrase completely — never just one word from it.
+
 If the word has a typo or is misspelled (only for French words), set found:false and put 2-3 correct French spelling suggestions in "suggestions".
 If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
-{"frenchWord":"...","translation":"accurate short translation in ${currentLangObj.aiName}, 1-4 words","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[]}`;
+{"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[]}`;
 
       const ai = new GoogleGenAI({ apiKey });
       const response = await generateWithFallback(ai, {
@@ -1713,7 +1717,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
             <div className="relative flex-1 flex">
               {/* Activity bookmark tabs (desktop) */}
-              <div className="hidden lg:flex flex-col gap-2 absolute top-8 right-0 translate-x-1/2 z-20">
+              <div className="hidden lg:flex flex-col gap-2 absolute top-1/2 -translate-y-1/2 right-0 translate-x-1/2 z-20">
                 <button
                   onClick={startReversePractice}
                   className="w-11 h-11 bg-white border-2 border-purple-100 text-purple-500 rounded-xl flex items-center justify-center shadow-md hover:bg-purple-50 hover:border-purple-300 hover:scale-105 transition-all active:scale-95"
