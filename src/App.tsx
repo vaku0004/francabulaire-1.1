@@ -33,7 +33,8 @@ import {
   RefreshCw,
   Trash2,
   Keyboard,
-  Edit2
+  Edit2,
+  BarChart3
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Word, ReviewGrade } from './types';
@@ -424,10 +425,13 @@ Règles importantes :
     return () => clearInterval(t);
   }, []);
 
-  // Daily activity log for the streak counter (stored locally)
+  // Daily activity logs for streak & statistics (stored locally)
   const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const [activityLog, setActivityLog] = useState<Record<string, number>>(() => {
     try { return JSON.parse(localStorage.getItem('francab_activity') || '{}'); } catch { return {}; }
+  });
+  const [exerciseLog, setExerciseLog] = useState<Record<string, number>>(() => {
+    try { return JSON.parse(localStorage.getItem('francab_activity_ex') || '{}'); } catch { return {}; }
   });
   const recordActivity = () => {
     const key = dayKey(new Date());
@@ -437,13 +441,23 @@ Règles importantes :
       return next;
     });
   };
+  const recordExerciseActivity = (count = 1) => {
+    const key = dayKey(new Date());
+    setExerciseLog(prev => {
+      const next = { ...prev, [key]: (prev[key] || 0) + count };
+      localStorage.setItem('francab_activity_ex', JSON.stringify(next));
+      return next;
+    });
+  };
   const streak = useMemo(() => {
+    const active = (key: string) => (activityLog[key] || 0) > 0 || (exerciseLog[key] || 0) > 0;
     let s = 0;
     const d = new Date();
-    if (!activityLog[dayKey(d)]) d.setDate(d.getDate() - 1); // streak survives if today not started yet
-    while (activityLog[dayKey(d)]) { s++; d.setDate(d.getDate() - 1); }
+    if (!active(dayKey(d))) d.setDate(d.getDate() - 1); // streak survives if today not started yet
+    while (active(dayKey(d))) { s++; d.setDate(d.getDate() - 1); }
     return s;
-  }, [activityLog]);
+  }, [activityLog, exerciseLog]);
+  const [isStatsModalOpen, setIsStatsModalOpen] = useState(false);
   const [currentReviewIndex, setCurrentReviewIndex] = useState(0);
   const [showTranslation, setShowTranslation] = useState(false);
   const [justMastered, setJustMastered] = useState<string | null>(null);
@@ -688,6 +702,7 @@ Règles importantes :
         setSuccessfullyMatched(matchedId);
 
         setTimeout(() => {
+          recordExerciseActivity();
           // If this was the last pair — commit results to the shared queue:
           // words with errors go to the front, clean ones to the end
           const newSize = matchedIds.has(matchedId) ? matchedIds.size : matchedIds.size + 1;
@@ -1713,6 +1728,22 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   </button>
                 </div>
               )}
+            </div>
+
+            {/* Activity buttons (mobile row) */}
+            <div className="flex lg:hidden items-center justify-center gap-3">
+              <button onClick={startReversePractice} className="w-11 h-11 bg-white border-2 border-purple-100 text-purple-500 rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Rappel actif">
+                <Languages size={20} />
+              </button>
+              <button onClick={startMatchGame} className="w-11 h-11 bg-white border-2 border-indigo-100 text-indigo-500 rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Relier les mots">
+                <Grid2X2 size={20} />
+              </button>
+              <button onClick={openTextExercise} className="w-11 h-11 bg-white border-2 border-indigo-100 text-indigo-500 rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Phrases à compléter">
+                <FileText size={20} />
+              </button>
+              <button onClick={startQuizGame} className="w-11 h-11 bg-white border-2 border-emerald-100 text-emerald-500 rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Quiz">
+                <CheckCircle2 size={20} />
+              </button>
             </div>
 
             <div className="relative flex-1 flex">
@@ -3045,6 +3076,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                               setExerciseSessionQueue(prev => [...wrongWords, ...prev, ...okWords]);
                               batchWrongWordIds.current.clear();
                               setCurrentExerciseBatch([]);
+                              recordExerciseActivity(generatedStory.gaps.length);
                             }
                           }}
                           className="flex-1 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
@@ -3302,14 +3334,14 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
                     <div className="grid grid-cols-2 gap-3">
                       <button
-                        onClick={() => { requeueWord(reverseWord, false); nextReverseWord(); }}
+                        onClick={() => { requeueWord(reverseWord, false); recordExerciseActivity(); nextReverseWord(); }}
                         className="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-red-100 hover:bg-red-50 transition-colors text-red-500 font-bold text-xs uppercase tracking-widest"
                       >
                         <XCircle size={18} />
                         À revoir
                       </button>
                       <button
-                        onClick={() => { requeueWord(reverseWord, true); nextReverseWord(); }}
+                        onClick={() => { requeueWord(reverseWord, true); recordExerciseActivity(); nextReverseWord(); }}
                         className="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-emerald-100 hover:bg-emerald-50 transition-colors text-emerald-600 font-bold text-xs uppercase tracking-widest"
                       >
                         <CheckCircle2 size={18} />
@@ -3382,6 +3414,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                         onClick={() => {
                           setQuizSelected(opt);
                           requeueWord(quizWord, isCorrectOpt);
+                          recordExerciseActivity();
                           if (isCorrectOpt) setTimeout(nextQuizQuestion, 900);
                         }}
                         className={`w-full p-4 rounded-2xl border-2 font-bold text-sm transition-all text-center ${
@@ -3414,6 +3447,110 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
             </motion.div>
           </div>
         )}
+        {/* Statistics Modal */}
+        {isStatsModalOpen && (() => {
+          const days: { key: string; label: string; cards: number; exercises: number }[] = [];
+          for (let i = 13; i >= 0; i--) {
+            const d = new Date();
+            d.setDate(d.getDate() - i);
+            const key = dayKey(d);
+            days.push({
+              key,
+              label: `${d.getDate()}/${d.getMonth() + 1}`,
+              cards: activityLog[key] || 0,
+              exercises: exerciseLog[key] || 0,
+            });
+          }
+          const maxVal = Math.max(1, ...days.map(d => Math.max(d.cards, d.exercises)));
+          const totalCards = days.reduce((s, d) => s + d.cards, 0);
+          const totalEx = days.reduce((s, d) => s + d.exercises, 0);
+          return (
+            <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[200] flex items-center justify-center p-4 sm:p-6">
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                className="bg-white rounded-3xl shadow-2xl w-full max-w-lg flex flex-col overflow-hidden"
+              >
+                <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
+                      <BarChart3 size={24} />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-bold text-slate-900">Statistiques</h3>
+                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">14 derniers jours</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setIsStatsModalOpen(false)}
+                    className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <div className="p-6 space-y-6">
+                  <div className="grid grid-cols-3 gap-3 text-center">
+                    <div className="p-3 bg-indigo-50 rounded-2xl">
+                      <p className="text-2xl font-black text-indigo-600">{totalCards}</p>
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-indigo-400">Cartes révisées</p>
+                    </div>
+                    <div className="p-3 bg-emerald-50 rounded-2xl">
+                      <p className="text-2xl font-black text-emerald-600">{totalEx}</p>
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-400">Exercices réussis</p>
+                    </div>
+                    <div className="p-3 bg-orange-50 rounded-2xl">
+                      <p className="text-2xl font-black text-orange-500">🔥 {streak}</p>
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-orange-400">Jours d'affilée</p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-end justify-between gap-1 h-36 px-1">
+                      {days.map(d => (
+                        <div key={d.key} className="flex-1 flex flex-col items-center justify-end gap-0.5 h-full group relative">
+                          <div className="absolute -top-7 hidden group-hover:block bg-slate-800 text-white text-[9px] font-bold px-2 py-1 rounded-lg whitespace-nowrap z-10">
+                            {d.cards} cartes · {d.exercises} ex.
+                          </div>
+                          <div className="w-full flex items-end justify-center gap-[2px] flex-1">
+                            <div
+                              className="w-[40%] bg-indigo-400 rounded-t-sm min-h-[2px]"
+                              style={{ height: `${(d.cards / maxVal) * 100}%`, opacity: d.cards ? 1 : 0.15 }}
+                            />
+                            <div
+                              className="w-[40%] bg-emerald-400 rounded-t-sm min-h-[2px]"
+                              style={{ height: `${(d.exercises / maxVal) * 100}%`, opacity: d.exercises ? 1 : 0.15 }}
+                            />
+                          </div>
+                          <span className="text-[7px] font-bold text-slate-400 rotate-0">{d.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center justify-center gap-4 mt-3">
+                      <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                        <span className="w-3 h-3 bg-indigo-400 rounded-sm inline-block" /> Cartes
+                      </span>
+                      <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                        <span className="w-3 h-3 bg-emerald-400 rounded-sm inline-block" /> Exercices
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 text-center pt-2 border-t border-slate-100">
+                    <div>
+                      <p className="text-lg font-black text-slate-900">{words.length}</p>
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Mots au total</p>
+                    </div>
+                    <div>
+                      <p className="text-lg font-black text-emerald-600">{masteredCount}</p>
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Mots appris</p>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
       </AnimatePresence>
 
       {/* Footer */}
@@ -3443,35 +3580,15 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
             </div>
           </div>
 
-          {/* Central Icons */}
+          {/* Central: Statistics */}
           <div className="flex items-center gap-4">
             <button
-              onClick={startReversePractice}
-              className="w-12 h-12 bg-purple-50 text-purple-600 rounded-full flex items-center justify-center hover:bg-purple-100 transition-all border-2 border-purple-100 shadow-sm active:scale-95"
-              title="Rappel actif : traduction → français"
+              onClick={() => setIsStatsModalOpen(true)}
+              className="flex items-center gap-3 px-6 py-3 bg-indigo-50 text-indigo-600 rounded-2xl hover:bg-indigo-100 transition-all border-2 border-indigo-100 shadow-sm active:scale-95 font-bold text-xs uppercase tracking-widest"
+              title="Statistiques"
             >
-              <Languages size={24} />
-            </button>
-            <button
-              onClick={startMatchGame}
-              className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center hover:bg-indigo-100 transition-all border-2 border-indigo-100 shadow-sm active:scale-95"
-              title="Relier les mots"
-            >
-              <Grid2X2 size={24} />
-            </button>
-            <button
-              onClick={openTextExercise}
-              className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center hover:bg-indigo-100 transition-all border-2 border-indigo-100 shadow-sm active:scale-95"
-              title="Phrases à compléter"
-            >
-              <FileText size={24} />
-            </button>
-            <button
-              onClick={startQuizGame}
-              className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center hover:bg-emerald-100 transition-all border-2 border-emerald-100 shadow-sm active:scale-95"
-              title="Quiz : choisissez la bonne traduction"
-            >
-              <CheckCircle2 size={24} />
+              <BarChart3 size={20} />
+              Statistiques
             </button>
           </div>
 
