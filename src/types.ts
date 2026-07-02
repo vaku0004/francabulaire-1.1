@@ -16,6 +16,7 @@ export interface Word {
   review_count: number;
   last_reviewed_at?: number;
   first_reviewed_at?: number;
+  last_grade?: ReviewGrade;
 }
 
 export type ReviewGrade = 'remembered' | 'almost' | 'forgotten';

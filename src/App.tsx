@@ -535,47 +535,46 @@ Règles importantes :
   const [quizOptions, setQuizOptions] = useState<string[]>([]);
   const [quizSelected, setQuizSelected] = useState<string | null>(null);
 
-  // Eligible words for the footer games, ordered for the shared exercise queue:
-  // 1. words reviewed TODAY first (the daily session), then words seen on earlier days
-  // 2. within each group: forgotten first (low review_count), then almost, then remembered, mastered last
-  const buildExerciseEligible = useCallback(() => {
+  // Exercise queue ordering:
+  // 1. forgotten words (last grade "oublié")
+  // 2. almost-known words + words with exercise errors (last grade "presque")
+  // 3. never-graded-yet words
+  // 4. remembered/mastered words — only after everything else is done
+  // Within each group: today's words first, then weaker (lower review_count) first.
+  const sortByExercisePriority = (arr: Word[]) => {
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
     const todayTs = startOfToday.getTime();
+    const rank = (w: Word) =>
+      w.last_grade === 'forgotten' ? 0
+        : w.last_grade === 'almost' ? 1
+        : (w.last_grade === 'remembered' || w.status === 'mastered') ? 3
+        : 2;
+    return [...arr].sort((a, b) => {
+      const ra = rank(a), rb = rank(b);
+      if (ra !== rb) return ra - rb;
+      const ta = a.last_reviewed_at && a.last_reviewed_at >= todayTs ? 0 : 1;
+      const tb = b.last_reviewed_at && b.last_reviewed_at >= todayTs ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+      const pa = (a.status === 'mastered' ? 100 : 0) + (a.review_count ?? 0);
+      const pb = (b.status === 'mastered' ? 100 : 0) + (b.review_count ?? 0);
+      return pa - pb;
+    });
+  };
 
+  const buildExerciseEligible = useCallback(() => {
     const eligible = words.filter(w => {
       const matchesLang = targetLanguage === 'Russe'
         ? (!w.target_lang || w.target_lang === 'Russe')
         : (w.target_lang === targetLanguage);
       return matchesLang && w.word && w.translation && !!w.last_reviewed_at;
     });
-
-    const sortKey = (w: Word) => {
-      const reviewedToday = w.last_reviewed_at && w.last_reviewed_at >= todayTs ? 0 : 1;
-      const priority = (w.status === 'mastered' ? 100 : 0) + (w.review_count ?? 0);
-      return { reviewedToday, priority };
-    };
-
-    return [...eligible].sort((a, b) => {
-      const ka = sortKey(a), kb = sortKey(b);
-      if (ka.reviewedToday !== kb.reviewedToday) return ka.reviewedToday - kb.reviewedToday;
-      return ka.priority - kb.priority;
-    });
+    return sortByExercisePriority(eligible);
   }, [words, targetLanguage]);
 
   const startMatchGame = useCallback(() => {
-    // Shared exercise queue: same ordering as the fill-in-the-blank exercise
-    const eligible = buildExerciseEligible();
-
-    // Rebuild queue only when exhausted, otherwise append newly eligible words
-    let queue = exerciseSessionQueue;
-    if (queue.length === 0 && currentExerciseBatch.length === 0) {
-      queue = eligible;
-    } else {
-      const known = new Set([...queue.map(w => w.id), ...currentExerciseBatch.map(w => w.id)]);
-      const additions = eligible.filter(w => !known.has(w.id));
-      if (additions.length > 0) queue = [...queue, ...additions];
-    }
+    // Shared exercise queue: merged and re-sorted by latest grades
+    const queue = openExerciseQueue();
 
     // Pool = next words from the queue that have translations
     const poolCandidates = queue.filter(w => w.word && w.translation);
@@ -623,8 +622,17 @@ Règles importantes :
     return queue;
   };
 
-  const pullNextWord = (): Word | null => {
-    const q = getOrBuildExerciseQueue();
+  // On opening an activity: merge fresh words AND re-sort so latest grades apply
+  // (remembered words sink to the end, forgotten/errored float to the front).
+  // Mid-session pulls do NOT re-sort — the in-session requeue order is preserved.
+  const openExerciseQueue = (): Word[] => {
+    const sorted = sortByExercisePriority(getOrBuildExerciseQueue());
+    setExerciseSessionQueue(sorted);
+    return sorted;
+  };
+
+  const pullNextWord = (fromQueue?: Word[]): Word | null => {
+    const q = fromQueue ?? getOrBuildExerciseQueue();
     if (q.length === 0) return null;
     setExerciseSessionQueue(q.slice(1));
     return q[0];
@@ -650,19 +658,20 @@ Règles importantes :
         next_review_at: Math.min(w.next_review_at, Date.now() + DAY),
         review_count: Math.max(0, (w.review_count ?? 0) - 1),
         status: w.status === 'mastered' ? 'learning' as const : w.status,
+        last_grade: 'almost' as const, // exercise error = weak word, stays near queue front
       };
     }));
   };
 
   const openTextExercise = () => {
-    getOrBuildExerciseQueue();
+    openExerciseQueue();
     setIsTextExerciseModalOpen(true);
   };
 
   // ===== Reverse practice: translation shown, recall the French word =====
 
   const startReversePractice = () => {
-    const w = pullNextWord();
+    const w = pullNextWord(openExerciseQueue());
     if (!w) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
     setReverseWord(w);
     setReverseRevealed(false);
@@ -710,7 +719,7 @@ Règles importantes :
   };
 
   const startQuizGame = () => {
-    const w = pullNextWord();
+    const w = pullNextWord(openExerciseQueue());
     if (!w) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
     const opts = buildQuizOptions(w);
     if (opts.length < 4) {
@@ -1371,7 +1380,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
           setTimeout(() => setJustMastered(null), 3000);
         }
 
-        return { ...w, next_review_at: nextReview, status, review_count: reviewCount, last_reviewed_at: Date.now(), first_reviewed_at: w.first_reviewed_at ?? Date.now() };
+        return { ...w, next_review_at: nextReview, status, review_count: reviewCount, last_grade: grade, last_reviewed_at: Date.now(), first_reviewed_at: w.first_reviewed_at ?? Date.now() };
       }
       return w;
     });
