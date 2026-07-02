@@ -613,6 +613,23 @@ Règles importantes :
       : [...prev.slice(0, 2), w, ...prev.slice(2)]);
   };
 
+  // An error in any activity feeds back into spaced repetition:
+  // the word comes back to flashcards tomorrow (or keeps an earlier date),
+  // steps one level back, and mastered words drop back to learning.
+  // Clean answers do NOT touch the schedule — only real card reviews advance it.
+  const penalizeWordFromExercise = (wordId: string) => {
+    const DAY = 1000 * 60 * 60 * 24;
+    setWords(prev => prev.map(w => {
+      if (w.id !== wordId) return w;
+      return {
+        ...w,
+        next_review_at: Math.min(w.next_review_at, Date.now() + DAY),
+        review_count: Math.max(0, (w.review_count ?? 0) - 1),
+        status: w.status === 'mastered' ? 'learning' as const : w.status,
+      };
+    }));
+  };
+
   const openTextExercise = () => {
     getOrBuildExerciseQueue();
     setIsTextExerciseModalOpen(true);
@@ -769,6 +786,10 @@ Règles importantes :
         }, 1500); 
       } else {
         // WRONG — flag the word whose translation the user failed to pick
+        // (penalize only once per word per game, so misclicks don't pile up)
+        if (!matchWrongWordIds.current.has(selectedWordId)) {
+          penalizeWordFromExercise(selectedWordId);
+        }
         matchWrongWordIds.current.add(selectedWordId);
         setIsProcessingMatch(true);
         setWrongMatch({ wordId: selectedWordId, transId: selectedTranslationId });
@@ -3074,6 +3095,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                               const wrongWords = currentExerciseBatch.filter(w => batchWrongWordIds.current.has(w.id));
                               const okWords = currentExerciseBatch.filter(w => !batchWrongWordIds.current.has(w.id));
                               setExerciseSessionQueue(prev => [...wrongWords, ...prev, ...okWords]);
+                              wrongWords.forEach(w => penalizeWordFromExercise(w.id));
                               batchWrongWordIds.current.clear();
                               setCurrentExerciseBatch([]);
                               recordExerciseActivity(generatedStory.gaps.length);
@@ -3334,7 +3356,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
                     <div className="grid grid-cols-2 gap-3">
                       <button
-                        onClick={() => { requeueWord(reverseWord, false); recordExerciseActivity(); nextReverseWord(); }}
+                        onClick={() => { requeueWord(reverseWord, false); penalizeWordFromExercise(reverseWord.id); recordExerciseActivity(); nextReverseWord(); }}
                         className="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-red-100 hover:bg-red-50 transition-colors text-red-500 font-bold text-xs uppercase tracking-widest"
                       >
                         <XCircle size={18} />
@@ -3414,6 +3436,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                         onClick={() => {
                           setQuizSelected(opt);
                           requeueWord(quizWord, isCorrectOpt);
+                          if (!isCorrectOpt) penalizeWordFromExercise(quizWord.id);
                           recordExerciseActivity();
                           if (isCorrectOpt) setTimeout(nextQuizQuestion, 900);
                         }}
