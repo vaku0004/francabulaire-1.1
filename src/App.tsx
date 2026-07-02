@@ -36,17 +36,12 @@ import {
   Edit2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import * as XLSX from 'xlsx';
-import mammoth from 'mammoth';
-import * as pdfjsLib from 'pdfjs-dist';
 import { Word, ReviewGrade } from './types';
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import { auth, db, googleProvider } from './lib/firebase';
 import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 import { doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
-
-// Set up PDF.js worker using CDN (ESM version for 5.x)
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+// Heavy file-parsing libraries (xlsx, mammoth, pdfjs-dist) are lazy-loaded in handleFileUpload
 
 const STORAGE_KEY = 'mon_francais_vocab';
 const REVIEW_INTERVALS = [1, 3, 7, 14, 30]; // Spaced repetition intervals in days
@@ -1284,15 +1279,19 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
     try {
       if (fileType === 'xlsx' || fileType === 'xls') {
+        const XLSX = await import('xlsx');
         const data = await file.arrayBuffer();
         const workbook = XLSX.read(data);
         const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
         extractedText = XLSX.utils.sheet_to_txt(firstSheet);
       } else if (fileType === 'docx') {
+        const mammoth = (await import('mammoth')).default;
         const arrayBuffer = await file.arrayBuffer();
         const result = await mammoth.extractRawText({ arrayBuffer });
         extractedText = result.value;
       } else if (fileType === 'pdf') {
+        const pdfjsLib = await import('pdfjs-dist');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
         const arrayBuffer = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         let fullText = "";
@@ -1695,7 +1694,16 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                         </div>
                       {currentWord?.example && ((currentWord?.review_count ?? 0) < 2 || showTranslation) && (
                         <div className="space-y-1">
-                          <p className="text-slate-500 italic text-base sm:text-lg max-w-md">"{cleanExample(currentWord.example)}"</p>
+                          <p className="text-slate-500 italic text-base sm:text-lg max-w-md inline-flex items-start gap-1.5">
+                            <span>"{cleanExample(currentWord.example)}"</span>
+                            <button
+                              onClick={() => speak(cleanExample(currentWord.example))}
+                              className="p-1 mt-0.5 text-indigo-300 hover:text-indigo-600 transition-colors shrink-0"
+                              title="Écouter la phrase"
+                            >
+                              <Volume2 size={16} />
+                            </button>
+                          </p>
                           {currentWord?.infinitive && (
                             <p className="text-indigo-500/40 text-[10px] font-bold mt-1 uppercase tracking-tighter">
                               inf — {currentWord.infinitive}
@@ -1968,8 +1976,15 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     {searchResult.example && (
                       <div>
                         <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-widest">Exemple</p>
-                        <p className="text-sm text-slate-600 italic leading-relaxed">
-                          {cleanExample(searchResult.example)}
+                        <p className="text-sm text-slate-600 italic leading-relaxed inline-flex items-start gap-1.5">
+                          <span>{cleanExample(searchResult.example)}</span>
+                          <button
+                            onClick={() => speak(cleanExample(searchResult.example))}
+                            className="p-0.5 text-indigo-300 hover:text-indigo-600 transition-colors shrink-0"
+                            title="Écouter la phrase"
+                          >
+                            <Volume2 size={14} />
+                          </button>
                         </p>
                         {getExampleTranslation(searchResult) && (
                           <p className="text-[10px] text-slate-400 italic mt-1">
@@ -2391,8 +2406,31 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  {words.length > 0 && (
+                    <button
+                      onClick={() => {
+                        const esc = (s: string) => `"${(s || '').replace(/"/g, '""')}"`;
+                        const header = 'word;translation;gender;example;exampleTranslation;status;review_count';
+                        const rows = words.map(w =>
+                          [w.word, w.translation, w.gender || '', w.example || '', w.exampleTranslation || '', w.status, String(w.review_count ?? 0)].map(esc).join(';')
+                        );
+                        const csv = '﻿' + [header, ...rows].join('\r\n');
+                        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+                        const a = document.createElement('a');
+                        a.href = URL.createObjectURL(blob);
+                        a.download = `francabulaire_${dayKey(new Date())}.csv`;
+                        a.click();
+                        URL.revokeObjectURL(a.href);
+                      }}
+                      className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 text-emerald-600 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-emerald-100 transition-colors"
+                      title="Exporter en CSV"
+                    >
+                      <Download size={14} />
+                      CSV
+                    </button>
+                  )}
                   {words.some(w => w.target_lang !== targetLanguage && !(targetLanguage === 'Russe' && !w.target_lang)) && (
-                    <button 
+                    <button
                       onClick={() => translateLibrary(targetLanguage)}
                       className="flex items-center gap-2 px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-indigo-100 transition-colors"
                       title="Traduire les mots restants"
