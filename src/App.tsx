@@ -718,29 +718,74 @@ Règles importantes :
     return [target.translation, ...distractors].sort(() => Math.random() - 0.5);
   };
 
+  // AI invents 3 plausible wrong translations of the SAME part of speech and form
+  const generateQuizDistractors = async (target: Word): Promise<string[] | null> => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
+      if (!apiKey) return null;
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await generateWithFallback(ai, {
+        contents: `Tu prépares un quiz de vocabulaire français.
+Mot français : "${target.word}"
+Traduction correcte en ${currentLangObj.aiName} : "${target.translation}"
+
+Invente 3 traductions FAUSSES mais plausibles en ${currentLangObj.aiName} :
+- STRICTEMENT la même partie du discours et la même forme grammaticale que la traduction correcte (verbe conjugué → verbes conjugués à la même personne et au même temps ; nom → noms ; adjectif → adjectifs ; expression/phrase → expressions similaires)
+- sens clairement différent de la traduction correcte (pas de synonymes !)
+- longueur et registre similaires, pour que la bonne réponse ne soit pas évidente
+
+Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","..."]}`,
+        config: {}
+      });
+      const result = JSON.parse(extractJson(response) || '{}');
+      if (Array.isArray(result.options)) {
+        const seen = new Set([normalizeWord(target.translation)]);
+        const opts = result.options
+          .filter((o: any) => typeof o === 'string' && o.trim())
+          .filter((o: string) => {
+            const k = normalizeWord(o);
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+          })
+          .slice(0, 3);
+        if (opts.length === 3) return opts;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const prepareQuizQuestion = async (w: Word) => {
+    setQuizWord(w);
+    setQuizOptions([]); // empty = loading state
+    setQuizSelected(null);
+    const aiOpts = await generateQuizDistractors(w);
+    const opts = aiOpts
+      ? [w.translation, ...aiOpts].sort(() => Math.random() - 0.5)
+      : buildQuizOptions(w); // offline/quota fallback from the base
+    if (opts.length < 4) {
+      setExerciseSessionQueue(prev => [w, ...prev]);
+      alert("Impossible de préparer la question. Réessayez.");
+      setIsQuizModalOpen(false);
+      setQuizWord(null);
+      return;
+    }
+    setQuizOptions(opts);
+  };
+
   const startQuizGame = () => {
     const w = pullNextWord(openExerciseQueue());
     if (!w) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
-    const opts = buildQuizOptions(w);
-    if (opts.length < 4) {
-      setExerciseSessionQueue(prev => [w, ...prev]);
-      alert("Il faut plus de mots variés dans votre base pour le quiz.");
-      return;
-    }
-    setQuizWord(w);
-    setQuizOptions(opts);
-    setQuizSelected(null);
     setIsQuizModalOpen(true);
+    prepareQuizQuestion(w);
   };
 
   const nextQuizQuestion = () => {
     const w = pullNextWord();
     if (!w) { setIsQuizModalOpen(false); setQuizWord(null); return; }
-    const opts = buildQuizOptions(w);
-    if (opts.length < 4) { setIsQuizModalOpen(false); setQuizWord(null); return; }
-    setQuizWord(w);
-    setQuizOptions(opts);
-    setQuizSelected(null);
+    prepareQuizQuestion(w);
   };
 
   useEffect(() => {
@@ -3457,6 +3502,16 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <Volume2 size={20} />
                   </button>
                 </div>
+
+                {quizOptions.length === 0 && (
+                  <div className="w-full py-10 flex flex-col items-center gap-3">
+                    <div className="relative w-10 h-10">
+                      <div className="absolute inset-0 border-4 border-emerald-100 rounded-full"></div>
+                      <div className="absolute inset-0 border-4 border-emerald-500 rounded-full border-t-transparent animate-spin"></div>
+                    </div>
+                    <p className="text-xs text-slate-400 font-medium animate-pulse">Préparation des options...</p>
+                  </div>
+                )}
 
                 <div className="w-full grid grid-cols-1 gap-2.5">
                   {quizOptions.map((opt) => {
