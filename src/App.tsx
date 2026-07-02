@@ -486,6 +486,17 @@ Règles importantes :
   const [wrongMatch, setWrongMatch] = useState<{wordId: string, transId: string} | null>(null);
   const [isProcessingMatch, setIsProcessingMatch] = useState(false);
 
+  // Reverse practice (translation → French) state
+  const [isReverseModalOpen, setIsReverseModalOpen] = useState(false);
+  const [reverseWord, setReverseWord] = useState<Word | null>(null);
+  const [reverseRevealed, setReverseRevealed] = useState(false);
+
+  // Quiz (word + 4 choices) state
+  const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
+  const [quizWord, setQuizWord] = useState<Word | null>(null);
+  const [quizOptions, setQuizOptions] = useState<string[]>([]);
+  const [quizSelected, setQuizSelected] = useState<string | null>(null);
+
   // Eligible words for the footer games, ordered for the shared exercise queue:
   // 1. words reviewed TODAY first (the daily session), then words seen on earlier days
   // 2. within each group: forgotten first (low review_count), then almost, then remembered, mastered last
@@ -556,6 +567,117 @@ Règles importantes :
     setWrongMatch(null);
     setIsMatchModalOpen(true);
   }, [buildExerciseEligible, exerciseSessionQueue, currentExerciseBatch]);
+
+  // ===== Shared queue helpers for single-word activities (reverse practice, quiz) =====
+
+  // Merge newly eligible words into the persistent queue and return it
+  const getOrBuildExerciseQueue = (): Word[] => {
+    const eligible = buildExerciseEligible();
+    let queue: Word[];
+    if (exerciseSessionQueue.length === 0 && currentExerciseBatch.length === 0) {
+      queue = eligible;
+    } else {
+      const known = new Set([...exerciseSessionQueue.map(w => w.id), ...currentExerciseBatch.map(w => w.id)]);
+      const additions = eligible.filter(w => !known.has(w.id));
+      queue = additions.length > 0 ? [...exerciseSessionQueue, ...additions] : exerciseSessionQueue;
+    }
+    setExerciseSessionQueue(queue);
+    return queue;
+  };
+
+  const pullNextWord = (): Word | null => {
+    const q = getOrBuildExerciseQueue();
+    if (q.length === 0) return null;
+    setExerciseSessionQueue(q.slice(1));
+    return q[0];
+  };
+
+  // Correct answers go to the end; wrong ones come back soon (but not immediately)
+  const requeueWord = (w: Word, wasCorrect: boolean) => {
+    setExerciseSessionQueue(prev => wasCorrect
+      ? [...prev, w]
+      : [...prev.slice(0, 2), w, ...prev.slice(2)]);
+  };
+
+  const openTextExercise = () => {
+    getOrBuildExerciseQueue();
+    setIsTextExerciseModalOpen(true);
+  };
+
+  // ===== Reverse practice: translation shown, recall the French word =====
+
+  const startReversePractice = () => {
+    const w = pullNextWord();
+    if (!w) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
+    setReverseWord(w);
+    setReverseRevealed(false);
+    setIsReverseModalOpen(true);
+  };
+
+  const nextReverseWord = () => {
+    const w = pullNextWord();
+    if (!w) { setIsReverseModalOpen(false); setReverseWord(null); return; }
+    setReverseWord(w);
+    setReverseRevealed(false);
+  };
+
+  // ===== Quiz: French word + 4 translation options of the same part of speech =====
+
+  // Part-of-speech heuristic from stored data: verbs carry an infinitive, nouns a gender
+  const posOf = (w: Word): 'verb' | 'noun' | 'other' =>
+    (w.infinitive && w.infinitive.trim()) ? 'verb'
+      : (w.gender === 'm' || w.gender === 'f') ? 'noun'
+      : 'other';
+
+  const buildQuizOptions = (target: Word): string[] => {
+    const ml = (w: Word) => targetLanguage === 'Russe'
+      ? (!w.target_lang || w.target_lang === 'Russe')
+      : w.target_lang === targetLanguage;
+    const pool = words.filter(w =>
+      w.id !== target.id && ml(w) && w.translation &&
+      normalizeWord(w.translation) !== normalizeWord(target.translation)
+    );
+    // Same part of speech first, so options are not trivially distinguishable
+    const samePos = pool.filter(w => posOf(w) === posOf(target)).sort(() => Math.random() - 0.5);
+    const others = pool.filter(w => posOf(w) !== posOf(target)).sort(() => Math.random() - 0.5);
+
+    const distractors: string[] = [];
+    const seen = new Set([normalizeWord(target.translation)]);
+    for (const src of [...samePos, ...others]) {
+      const key = normalizeWord(src.translation);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      distractors.push(src.translation);
+      if (distractors.length === 3) break;
+    }
+    if (distractors.length < 3) return [];
+    return [target.translation, ...distractors].sort(() => Math.random() - 0.5);
+  };
+
+  const startQuizGame = () => {
+    const w = pullNextWord();
+    if (!w) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
+    const opts = buildQuizOptions(w);
+    if (opts.length < 4) {
+      setExerciseSessionQueue(prev => [w, ...prev]);
+      alert("Il faut plus de mots variés dans votre base pour le quiz.");
+      return;
+    }
+    setQuizWord(w);
+    setQuizOptions(opts);
+    setQuizSelected(null);
+    setIsQuizModalOpen(true);
+  };
+
+  const nextQuizQuestion = () => {
+    const w = pullNextWord();
+    if (!w) { setIsQuizModalOpen(false); setQuizWord(null); return; }
+    const opts = buildQuizOptions(w);
+    if (opts.length < 4) { setIsQuizModalOpen(false); setQuizWord(null); return; }
+    setQuizWord(w);
+    setQuizOptions(opts);
+    setQuizSelected(null);
+  };
 
   useEffect(() => {
     if (selectedWordId && selectedTranslationId && !isProcessingMatch) {
@@ -1565,10 +1687,10 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
-          {/* Left Section: Flashcards */}
-          <section id="flashcards-section" className="order-2 lg:order-1 lg:col-span-7 space-y-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:items-stretch">
+
+          {/* Right Section: Flashcards (dictionary is on the left) */}
+          <section id="flashcards-section" className="order-2 lg:col-span-7 space-y-6 flex flex-col">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold flex items-center gap-2">
                 <RotateCcw size={18} className="text-indigo-600" />
@@ -1589,7 +1711,40 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               )}
             </div>
 
-            <div className="bg-white border border-slate-200 rounded-3xl p-8 min-h-[400px] flex flex-col items-center justify-center relative overflow-hidden shadow-sm">
+            <div className="relative flex-1 flex">
+              {/* Activity bookmark tabs (desktop) */}
+              <div className="hidden lg:flex flex-col gap-2 absolute top-8 right-0 translate-x-1/2 z-20">
+                <button
+                  onClick={startReversePractice}
+                  className="w-11 h-11 bg-white border-2 border-purple-100 text-purple-500 rounded-xl flex items-center justify-center shadow-md hover:bg-purple-50 hover:border-purple-300 hover:scale-105 transition-all active:scale-95"
+                  title="Rappel actif : traduction → français"
+                >
+                  <Languages size={20} />
+                </button>
+                <button
+                  onClick={startMatchGame}
+                  className="w-11 h-11 bg-white border-2 border-indigo-100 text-indigo-500 rounded-xl flex items-center justify-center shadow-md hover:bg-indigo-50 hover:border-indigo-300 hover:scale-105 transition-all active:scale-95"
+                  title="Relier les mots"
+                >
+                  <Grid2X2 size={20} />
+                </button>
+                <button
+                  onClick={openTextExercise}
+                  className="w-11 h-11 bg-white border-2 border-indigo-100 text-indigo-500 rounded-xl flex items-center justify-center shadow-md hover:bg-indigo-50 hover:border-indigo-300 hover:scale-105 transition-all active:scale-95"
+                  title="Phrases à compléter"
+                >
+                  <FileText size={20} />
+                </button>
+                <button
+                  onClick={startQuizGame}
+                  className="w-11 h-11 bg-white border-2 border-emerald-100 text-emerald-500 rounded-xl flex items-center justify-center shadow-md hover:bg-emerald-50 hover:border-emerald-300 hover:scale-105 transition-all active:scale-95"
+                  title="Quiz : choisissez la bonne traduction"
+                >
+                  <CheckCircle2 size={20} />
+                </button>
+              </div>
+
+            <div className="bg-white border border-slate-200 rounded-3xl p-8 min-h-[400px] flex-1 flex flex-col items-center justify-center relative overflow-hidden shadow-sm">
               <AnimatePresence>
                 {justMastered && (
                   <motion.div 
@@ -1821,16 +1976,17 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 )}
               </AnimatePresence>
             </div>
+            </div>
           </section>
 
-          {/* Right Section: Dictionary */}
-          <section id="dictionary-section" className="order-1 lg:order-2 lg:col-span-5 space-y-6">
+          {/* Left Section: Dictionary */}
+          <section id="dictionary-section" className="order-1 lg:col-span-5 space-y-6 flex flex-col">
             <h2 className="text-lg font-semibold flex items-center gap-2">
               <Search size={18} className="text-indigo-600" />
               Dictionnaire Intelligent
             </h2>
 
-            <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-6">
+            <div className="bg-gradient-to-br from-indigo-50 via-white to-purple-50 border-2 border-indigo-200 rounded-3xl p-6 shadow-md shadow-indigo-100/50 space-y-6 flex-1">
               <div className="space-y-3">
                 <AnimatePresence>
                   {showAccents && (
@@ -3074,6 +3230,186 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
             </motion.div>
           </div>
         )}
+
+        {/* Reverse Practice Modal: translation → French */}
+        {isReverseModalOpen && reverseWord && (
+          <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[200] flex items-center justify-center p-4 sm:p-6">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-purple-50 text-purple-600 rounded-xl">
+                    <Languages size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-slate-900">Rappel actif</h3>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                      {currentLangObj.flag} → 🇫🇷 · {exerciseSessionQueue.length} mots restants
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setExerciseSessionQueue(prev => [reverseWord, ...prev]);
+                    setIsReverseModalOpen(false);
+                    setReverseWord(null);
+                  }}
+                  className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="p-8 flex flex-col items-center gap-6 text-center">
+                <p className="text-[10px] font-bold uppercase text-purple-400 tracking-widest">Comment dit-on en français ?</p>
+                <h3 className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight break-words">
+                  {reverseWord.translation}
+                </h3>
+
+                {!reverseRevealed ? (
+                  <button
+                    onClick={() => { setReverseRevealed(true); speak(reverseWord.word); }}
+                    className="w-full max-w-xs p-6 border-2 border-dashed border-slate-200 hover:border-purple-300 bg-slate-50/50 rounded-2xl text-slate-400 font-medium transition-all"
+                  >
+                    Cliquez pour voir le mot français
+                  </button>
+                ) : (
+                  <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="w-full space-y-5">
+                    <div className="p-6 bg-purple-50/50 border-2 border-purple-200 rounded-2xl space-y-2">
+                      <div className="flex items-center justify-center gap-3">
+                        <p className="text-2xl font-bold text-purple-700">
+                          {getWordWithArticle(reverseWord.word, reverseWord.gender, reverseWord.isPlural)}
+                        </p>
+                        <button
+                          onClick={() => speak(reverseWord.word)}
+                          className="p-1.5 bg-purple-100 text-purple-600 rounded-full hover:bg-purple-200 transition-colors"
+                          title="Écouter"
+                        >
+                          <Volume2 size={18} />
+                        </button>
+                      </div>
+                      {reverseWord.example && (
+                        <p className="text-xs text-slate-500 italic">"{cleanExample(reverseWord.example)}"</p>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={() => { requeueWord(reverseWord, false); nextReverseWord(); }}
+                        className="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-red-100 hover:bg-red-50 transition-colors text-red-500 font-bold text-xs uppercase tracking-widest"
+                      >
+                        <XCircle size={18} />
+                        À revoir
+                      </button>
+                      <button
+                        onClick={() => { requeueWord(reverseWord, true); nextReverseWord(); }}
+                        className="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-emerald-100 hover:bg-emerald-50 transition-colors text-emerald-600 font-bold text-xs uppercase tracking-widest"
+                      >
+                        <CheckCircle2 size={18} />
+                        Je savais
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Quiz Modal: French word + 4 translation choices */}
+        {isQuizModalOpen && quizWord && (
+          <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[200] flex items-center justify-center p-4 sm:p-6">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-emerald-50 text-emerald-600 rounded-xl">
+                    <CheckCircle2 size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-slate-900">Quiz</h3>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                      Choisissez la bonne traduction · {exerciseSessionQueue.length} mots restants
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    if (quizSelected === null) {
+                      setExerciseSessionQueue(prev => [quizWord, ...prev]);
+                    }
+                    setIsQuizModalOpen(false);
+                    setQuizWord(null);
+                  }}
+                  className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="p-8 flex flex-col items-center gap-6">
+                <div className="flex items-center gap-3">
+                  <h3 className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight break-words text-center">
+                    {getWordWithArticle(quizWord.word, quizWord.gender, quizWord.isPlural)}
+                  </h3>
+                  <button
+                    onClick={() => speak(quizWord.word)}
+                    className="p-2 bg-indigo-50 text-indigo-600 rounded-full hover:bg-indigo-100 transition-colors shrink-0"
+                    title="Écouter"
+                  >
+                    <Volume2 size={20} />
+                  </button>
+                </div>
+
+                <div className="w-full grid grid-cols-1 gap-2.5">
+                  {quizOptions.map((opt) => {
+                    const isCorrectOpt = normalizeWord(opt) === normalizeWord(quizWord.translation);
+                    const isChosen = quizSelected === opt;
+                    return (
+                      <button
+                        key={opt}
+                        disabled={quizSelected !== null}
+                        onClick={() => {
+                          setQuizSelected(opt);
+                          requeueWord(quizWord, isCorrectOpt);
+                          if (isCorrectOpt) setTimeout(nextQuizQuestion, 900);
+                        }}
+                        className={`w-full p-4 rounded-2xl border-2 font-bold text-sm transition-all text-center ${
+                          quizSelected === null
+                            ? 'bg-white border-slate-200 text-slate-700 hover:border-emerald-300 hover:bg-emerald-50/50 active:scale-[0.98]'
+                            : isCorrectOpt
+                              ? 'bg-emerald-50 border-emerald-500 text-emerald-700'
+                              : isChosen
+                                ? 'bg-red-50 border-red-400 text-red-600'
+                                : 'bg-slate-50 border-slate-100 text-slate-300'
+                        }`}
+                      >
+                        {opt}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {quizSelected !== null && normalizeWord(quizSelected) !== normalizeWord(quizWord.translation) && (
+                  <motion.button
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    onClick={nextQuizQuestion}
+                    className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
+                  >
+                    Suivant
+                  </motion.button>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
       </AnimatePresence>
 
       {/* Footer */}
@@ -3105,7 +3441,14 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
           {/* Central Icons */}
           <div className="flex items-center gap-4">
-            <button 
+            <button
+              onClick={startReversePractice}
+              className="w-12 h-12 bg-purple-50 text-purple-600 rounded-full flex items-center justify-center hover:bg-purple-100 transition-all border-2 border-purple-100 shadow-sm active:scale-95"
+              title="Rappel actif : traduction → français"
+            >
+              <Languages size={24} />
+            </button>
+            <button
               onClick={startMatchGame}
               className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center hover:bg-indigo-100 transition-all border-2 border-indigo-100 shadow-sm active:scale-95"
               title="Relier les mots"
@@ -3113,24 +3456,18 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               <Grid2X2 size={24} />
             </button>
             <button
-              onClick={() => {
-                const eligible = buildExerciseEligible();
-                // Persist queue progress across modal opens:
-                // rebuild only when exhausted, otherwise just append newly eligible words
-                setExerciseSessionQueue(prev => {
-                  if (prev.length === 0 && currentExerciseBatch.length === 0) {
-                    return eligible;
-                  }
-                  const known = new Set([...prev.map(w => w.id), ...currentExerciseBatch.map(w => w.id)]);
-                  const additions = eligible.filter(w => !known.has(w.id));
-                  return additions.length > 0 ? [...prev, ...additions] : prev;
-                });
-                setIsTextExerciseModalOpen(true);
-              }}
+              onClick={openTextExercise}
               className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center hover:bg-indigo-100 transition-all border-2 border-indigo-100 shadow-sm active:scale-95"
-              title="Exercice de texte"
+              title="Phrases à compléter"
             >
               <FileText size={24} />
+            </button>
+            <button
+              onClick={startQuizGame}
+              className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center hover:bg-emerald-100 transition-all border-2 border-emerald-100 shadow-sm active:scale-95"
+              title="Quiz : choisissez la bonne traduction"
+            >
+              <CheckCircle2 size={24} />
             </button>
           </div>
 
