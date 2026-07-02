@@ -428,6 +428,27 @@ Règles importantes :
     const t = setInterval(() => setClockTick(x => x + 1), 60000);
     return () => clearInterval(t);
   }, []);
+
+  // Daily activity log for the streak counter (stored locally)
+  const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const [activityLog, setActivityLog] = useState<Record<string, number>>(() => {
+    try { return JSON.parse(localStorage.getItem('francab_activity') || '{}'); } catch { return {}; }
+  });
+  const recordActivity = () => {
+    const key = dayKey(new Date());
+    setActivityLog(prev => {
+      const next = { ...prev, [key]: (prev[key] || 0) + 1 };
+      localStorage.setItem('francab_activity', JSON.stringify(next));
+      return next;
+    });
+  };
+  const streak = useMemo(() => {
+    let s = 0;
+    const d = new Date();
+    if (!activityLog[dayKey(d)]) d.setDate(d.getDate() - 1); // streak survives if today not started yet
+    while (activityLog[dayKey(d)]) { s++; d.setDate(d.getDate() - 1); }
+    return s;
+  }, [activityLog]);
   const [currentReviewIndex, setCurrentReviewIndex] = useState(0);
   const [showTranslation, setShowTranslation] = useState(false);
   const [justMastered, setJustMastered] = useState<string | null>(null);
@@ -853,7 +874,9 @@ Règles importantes :
       ? (!w.target_lang || w.target_lang === 'Russe')
       : (w.target_lang === targetLanguage);
 
-    const due = words.filter(w => matchesLang(w) && w.status !== 'mastered' && w.next_review_at <= now);
+    // Mastered words are included too: they get rare maintenance reviews when due
+    // (their high review_count sorts them to the lowest priority automatically)
+    const due = words.filter(w => matchesLang(w) && w.next_review_at <= now);
 
     // Lower review_count = more forgotten = higher priority; then earlier due date
     const byPriority = (a: Word, b: Word) => {
@@ -1133,32 +1156,32 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
         let status = w.status;
         let reviewCount = w.review_count;
 
+        const DAY = 1000 * 60 * 60 * 24;
+
         if (grade === 'remembered') {
-          // Follow the 1-3-7-14-30 days scheme
-          // review_count 0 -> just did 1st review, next is in 3 days
-          // review_count 1 -> just did 2nd review, next is in 7 days
-          // ...
-          // review_count 4 -> just did 5th review, mastered
-          
+          // Follow the 1-3-7-14-30 days scheme, then maintenance reviews with doubling intervals
           if (reviewCount < REVIEW_INTERVALS.length - 1) {
             const nextIntervalDays = REVIEW_INTERVALS[reviewCount + 1];
-            nextReview += 1000 * 60 * 60 * 24 * nextIntervalDays;
+            nextReview += DAY * nextIntervalDays;
             status = 'learning';
           } else {
+            // Mastered — but memory still fades: keep rare maintenance reviews
+            // review_count 4 -> next in 60d, 5 -> 120d, 6 -> 240d, then capped at 365d
+            const maintenanceDays = Math.min(365, 30 * Math.pow(2, reviewCount - 3));
+            nextReview += DAY * maintenanceDays;
             status = 'mastered';
           }
           reviewCount += 1;
         } else if (grade === 'almost') {
-          // Stay on current level but review tomorrow
-          nextReview += 1000 * 60 * 60 * 24 * 1;
+          // Step back one level and review tomorrow
+          nextReview += DAY;
           status = 'learning';
-          // Optional: decrease reviewCount to repeat the interval
           reviewCount = Math.max(0, reviewCount - 1);
         } else {
-          // Forgotten: review in 1 hour and restart progress
+          // Forgotten: soft reset — step back 2 levels (not to zero), retry in 1 hour
           nextReview += 1000 * 60 * 60 * 1;
           status = 'learning';
-          reviewCount = 0;
+          reviewCount = Math.max(0, reviewCount - 2);
         }
 
         const isNowMastered = status === 'mastered' && w.status !== 'mastered';
@@ -1174,7 +1197,8 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
     setWords(updatedWords);
     setShowTranslation(false);
-    
+    recordActivity();
+
     if (currentReviewIndex + 1 < sessionQueue.length) {
       setCurrentReviewIndex(prev => prev + 1);
     } else {
@@ -1346,7 +1370,10 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
             <div className="flex flex-col gap-1.5 w-48">
               <div className="flex justify-between text-[10px] font-bold uppercase tracking-tighter">
                 <span className="text-slate-400">Progression Quotidienne</span>
-                <span className="text-indigo-600">{dailyStats.reviewedToday} / {dailyStats.totalToday}</span>
+                <span className="flex items-center gap-2">
+                  {streak > 0 && <span className="text-orange-500" title={`${streak} jours d'affilée`}>🔥 {streak}</span>}
+                  <span className="text-indigo-600">{dailyStats.reviewedToday} / {dailyStats.totalToday}</span>
+                </span>
               </div>
               <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
                 <motion.div 
@@ -1620,27 +1647,38 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     className="w-full flex flex-col items-center gap-8"
                   >
                     <div className="text-center space-y-4">
-                      <span className="px-3 py-1 bg-indigo-50 text-indigo-600 text-[10px] font-bold uppercase tracking-widest rounded-full">
-                        Mot {currentReviewIndex + 1} sur {sessionQueue.length}
-                      </span>
+                      <div className="flex items-center justify-center gap-2">
+                        <span className="px-3 py-1 bg-indigo-50 text-indigo-600 text-[10px] font-bold uppercase tracking-widest rounded-full">
+                          Mot {currentReviewIndex + 1} sur {sessionQueue.length}
+                        </span>
+                        {(currentWord?.review_count ?? 0) >= 2 && (
+                          <span className="px-3 py-1 bg-purple-50 text-purple-600 text-[10px] font-bold uppercase tracking-widest rounded-full" title="Rappel actif : retrouvez le mot français">
+                            {currentLangObj.flag} → 🇫🇷
+                          </span>
+                        )}
+                      </div>
                         <div className="flex items-center justify-center gap-4">
                           <h3 className="text-3xl sm:text-4xl md:text-5xl font-black text-slate-900 tracking-tight break-words">
-                            {getWordWithArticle(currentWord?.word || '', currentWord?.gender, currentWord?.isPlural)}
+                            {(currentWord?.review_count ?? 0) >= 2
+                              ? currentWord?.translation
+                              : getWordWithArticle(currentWord?.word || '', currentWord?.gender, currentWord?.isPlural)}
                           </h3>
                           <div className="flex flex-col gap-2">
-                            <button 
-                              onClick={() => speak(currentWord?.word || '')}
-                              className={`p-2 rounded-full transition-all ${
-                                isSpeaking 
-                                  ? 'bg-indigo-600 text-white scale-110 shadow-lg shadow-indigo-200' 
-                                  : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'
-                              }`}
-                              title="Écouter la prononciation"
-                            >
-                              <Volume2 size={24} className={isSpeaking ? 'animate-pulse' : ''} />
-                            </button>
+                            {((currentWord?.review_count ?? 0) < 2 || showTranslation) && (
+                              <button
+                                onClick={() => speak(currentWord?.word || '')}
+                                className={`p-2 rounded-full transition-all ${
+                                  isSpeaking
+                                    ? 'bg-indigo-600 text-white scale-110 shadow-lg shadow-indigo-200'
+                                    : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'
+                                }`}
+                                title="Écouter la prononciation"
+                              >
+                                <Volume2 size={24} className={isSpeaking ? 'animate-pulse' : ''} />
+                              </button>
+                            )}
                             <div className="flex flex-col gap-1">
-                              {currentWord?.gender && currentWord.gender !== 'none' && (
+                              {currentWord?.gender && currentWord.gender !== 'none' && ((currentWord?.review_count ?? 0) < 2 || showTranslation) && (
                                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase text-center ${
                                   currentWord.gender === 'm' ? 'bg-blue-100 text-blue-600' : 'bg-pink-100 text-pink-600'
                                 }`}>
@@ -1655,7 +1693,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                             </div>
                           </div>
                         </div>
-                      {currentWord?.example && (
+                      {currentWord?.example && ((currentWord?.review_count ?? 0) < 2 || showTranslation) && (
                         <div className="space-y-1">
                           <p className="text-slate-500 italic text-base sm:text-lg max-w-md">"{cleanExample(currentWord.example)}"</p>
                           {currentWord?.infinitive && (
@@ -1664,9 +1702,9 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                             </p>
                           )}
                           {showTranslation && getExampleTranslation(currentWord) && (
-                            <motion.p 
-                              initial={{ opacity: 0 }} 
-                              animate={{ opacity: 1 }} 
+                            <motion.p
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
                               className="text-indigo-400/60 text-xs italic"
                             >
                               ({getExampleTranslation(currentWord)})
@@ -1677,20 +1715,26 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     </div>
 
                     <div className="w-full max-w-sm space-y-6">
-                      <div 
+                      <div
                         onClick={() => setShowTranslation(true)}
                         className={`p-6 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-all ${
-                          showTranslation 
-                            ? 'border-indigo-200 bg-indigo-50/30' 
+                          showTranslation
+                            ? 'border-indigo-200 bg-indigo-50/30'
                             : 'border-slate-200 hover:border-indigo-300 bg-slate-50/50'
                         }`}
                       >
                         {showTranslation ? (
                           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-                            <p className="text-xs text-indigo-400 uppercase font-bold tracking-widest mb-1">Traduction</p>
-                            <p className="text-xl sm:text-2xl font-bold text-indigo-600">{currentWord?.translation}</p>
+                            <p className="text-xs text-indigo-400 uppercase font-bold tracking-widest mb-1">
+                              {(currentWord?.review_count ?? 0) >= 2 ? 'En français' : 'Traduction'}
+                            </p>
+                            <p className="text-xl sm:text-2xl font-bold text-indigo-600">
+                              {(currentWord?.review_count ?? 0) >= 2
+                                ? getWordWithArticle(currentWord?.word || '', currentWord?.gender, currentWord?.isPlural)
+                                : currentWord?.translation}
+                            </p>
                             {currentWord?.infinitive && (
-                              <motion.div 
+                              <motion.div
                                 initial={{ opacity: 0, y: 5 }}
                                 animate={{ opacity: 1, y: 0 }}
                                 className="mt-2 pt-2 border-t border-indigo-100/50"
@@ -1708,7 +1752,9 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                             )}
                           </motion.div>
                         ) : (
-                          <p className="text-slate-400 font-medium">Cliquez pour voir la traduction</p>
+                          <p className="text-slate-400 font-medium">
+                            {(currentWord?.review_count ?? 0) >= 2 ? 'Cliquez pour voir le mot français' : 'Cliquez pour voir la traduction'}
+                          </p>
                         )}
                       </div>
 
