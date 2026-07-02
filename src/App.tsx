@@ -1263,6 +1263,11 @@ Translation rule:
 - For a SINGLE word: give a short accurate translation (1-4 words).
 - For a PHRASE or SENTENCE: translate the WHOLE phrase completely — never just one word from it.
 
+Part of speech:
+- If "frenchWord" is a VERB (any form, conjugated or already infinitive), ALWAYS fill "infinitive" with its infinitive form. If the word is already the infinitive, set "infinitive" to the SAME word (do not leave it empty).
+- Always fill "infinitiveTranslation" too when "infinitive" is set.
+- If "frenchWord" is NOT a verb, leave "infinitive" and "infinitiveTranslation" empty.
+
 If the word has a typo or is misspelled (only for French words), set found:false and put 2-3 correct French spelling suggestions in "suggestions".
 If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
 {"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[]}`;
@@ -1460,6 +1465,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
       const response = await generateWithFallback(ai, {
         contents: `Extract French vocabulary from the following text: ${text.substring(0, 5000)}.
         Identify word, translation in ${targetLanguage}, gender (m/f/none), isPlural, infinitive, and examples.
+        If a word is a verb, always fill "infinitive" (use the same word if it's already the infinitive) and "infinitiveTranslation". If it's not a verb, leave both empty.
         Respond ONLY with a JSON array of objects. No reasoning allowed.`,
         config: {}
       });
@@ -1966,12 +1972,21 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                               </button>
                             )}
                             <div className="flex flex-col gap-1">
-                              {currentWord?.gender && currentWord.gender !== 'none' && ((currentWord?.review_count ?? 0) < 2 || showTranslation) && (
-                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase text-center ${
-                                  currentWord.gender === 'm' ? 'bg-blue-100 text-blue-600' : 'bg-pink-100 text-pink-600'
-                                }`}>
-                                  {currentWord.gender === 'm' ? 'masc' : 'fém'}
-                                </span>
+                              {((currentWord?.review_count ?? 0) < 2 || showTranslation) && (
+                                <>
+                                  {currentWord?.gender && currentWord.gender !== 'none' && (
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase text-center ${
+                                      currentWord.gender === 'm' ? 'bg-blue-100 text-blue-600' : 'bg-pink-100 text-pink-600'
+                                    }`}>
+                                      {currentWord.gender === 'm' ? 'masc' : 'fém'}
+                                    </span>
+                                  )}
+                                  {currentWord?.infinitive && (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase text-center bg-purple-100 text-purple-600">
+                                      Verbe
+                                    </span>
+                                  )}
+                                </>
                               )}
                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase text-center ${
                                 currentWord?.status === 'mastered' ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'
@@ -1993,7 +2008,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                               <Volume2 size={16} />
                             </button>
                           </p>
-                          {currentWord?.infinitive && (
+                          {currentWord?.infinitive && normalizeWord(currentWord.infinitive) !== normalizeWord(currentWord.word) && (
                             <p className="text-indigo-500/40 text-[10px] font-bold mt-1 uppercase tracking-tighter">
                               inf — {currentWord.infinitive}
                             </p>
@@ -2224,6 +2239,11 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                             {searchResult.gender === 'm' ? 'm' : 'f'}
                           </span>
                         )}
+                        {searchResult.infinitive && (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-purple-100 text-purple-600">
+                            v
+                          </span>
+                        )}
                         <button
                           onClick={() => {
                             setWordListSearchQuery(searchResult.word);
@@ -2252,7 +2272,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <div>
                         <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-widest">{currentLangObj.name}</p>
                         <p className="text-lg font-semibold text-indigo-600">{searchResult.translation}</p>
-                      {searchResult.infinitive && (
+                      {searchResult.infinitive && normalizeWord(searchResult.infinitive) !== normalizeWord(searchResult.word) && (
                         <p className="text-xs font-medium text-indigo-500 mt-1">
                           Infinitif: {searchResult.infinitive}
                           {searchResult.infinitiveTranslation && (
