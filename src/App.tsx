@@ -332,6 +332,12 @@ Règles importantes :
   useEffect(() => {
     localStorage.setItem('target_language', targetLanguage);
     lastFetchedQuery.current = '';
+    // Exercise queue holds words of the previous language — reset it
+    setExerciseSessionQueue([]);
+    setCurrentExerciseBatch([]);
+    setGeneratedStory(null);
+    setExerciseFeedback(null);
+    setUserAnswers([]);
   }, [targetLanguage]);
 
   const speak = (text: string) => {
@@ -416,6 +422,12 @@ Règles importantes :
   const [isReviewing, setIsReviewing] = useState(false);
   const [reviewPaused, setReviewPaused] = useState(false);
   const [sessionQueue, setSessionQueue] = useState<Word[]>([]);
+  // Ticks every minute so time-based queues (e.g. "forgotten, retry in 1h") refresh without a reload
+  const [clockTick, setClockTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setClockTick(x => x + 1), 60000);
+    return () => clearInterval(t);
+  }, []);
   const [currentReviewIndex, setCurrentReviewIndex] = useState(0);
   const [showTranslation, setShowTranslation] = useState(false);
   const [justMastered, setJustMastered] = useState<string | null>(null);
@@ -777,7 +789,8 @@ Règles importantes :
     };
 
     if (user && db) {
-      const saveToFirestore = async () => {
+      // Debounce: batch rapid changes (e.g. grading cards) into one write
+      const timer = setTimeout(async () => {
         try {
           const userDocRef = doc(db, 'users', user.uid);
           const sanitizedWords = sanitizeForFirestore(words);
@@ -785,8 +798,8 @@ Règles importantes :
         } catch (e) {
           console.error("Error saving to Firestore:", e);
         }
-      };
-      saveToFirestore();
+      }, 1500);
+      return () => clearTimeout(timer);
     } else {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(words));
     }
@@ -877,7 +890,7 @@ Règles importantes :
     queue.push(...newWords.slice(0, newBudget));
 
     return queue;
-  }, [words, isReviewing, targetLanguage]);
+  }, [words, isReviewing, targetLanguage, clockTick]);
 
   const currentWord = sessionQueue[currentReviewIndex];
 
@@ -2513,7 +2526,11 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     const idToRemove = deletingId;
                     setWords(prev => prev.filter(w => w.id !== idToRemove));
                     setDeletingId(null);
-                    
+
+                    // Remove from exercise queues too (they hold copies)
+                    setExerciseSessionQueue(prev => prev.filter(w => w.id !== idToRemove));
+                    setCurrentExerciseBatch(prev => prev.filter(w => w.id !== idToRemove));
+
                     if (searchResult && searchResult.id === idToRemove) {
                       setSearchQuery('');
                     }
