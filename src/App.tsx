@@ -474,6 +474,30 @@ Règles importantes :
   // Exercise session queue: all reviewed words in priority order
   const [exerciseSessionQueue, setExerciseSessionQueue] = useState<Word[]>([]);
   const [currentExerciseBatch, setCurrentExerciseBatch] = useState<Word[]>([]);
+  const exerciseQueueRestored = React.useRef(false);
+
+  // Restore queue position from the previous session (stored as word ids)
+  useEffect(() => {
+    if (!hasLoaded || exerciseQueueRestored.current) return;
+    exerciseQueueRestored.current = true;
+    try {
+      const saved = JSON.parse(localStorage.getItem('francab_exercise_queue') || 'null');
+      if (saved && saved.lang === targetLanguage && Array.isArray(saved.ids)) {
+        const byId = new Map(words.map(w => [w.id, w]));
+        const restored = saved.ids
+          .map((id: string) => byId.get(id))
+          .filter(Boolean) as Word[];
+        if (restored.length > 0) setExerciseSessionQueue(restored);
+      }
+    } catch { /* corrupt data — start fresh */ }
+  }, [hasLoaded, words, targetLanguage]);
+
+  // Persist queue position on every change (unfinished batch words go to the front)
+  useEffect(() => {
+    if (!hasLoaded || !exerciseQueueRestored.current) return;
+    const ids = [...currentExerciseBatch.map(w => w.id), ...exerciseSessionQueue.map(w => w.id)];
+    localStorage.setItem('francab_exercise_queue', JSON.stringify({ lang: targetLanguage, ids }));
+  }, [exerciseSessionQueue, currentExerciseBatch, targetLanguage, hasLoaded]);
   const [wordListSearchQuery, setWordListSearchQuery] = useState('');
   const [isStoryLoading, setIsStoryLoading] = useState(false);
   const [generatedStory, setGeneratedStory] = useState<{
