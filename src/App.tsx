@@ -48,6 +48,7 @@ const STORAGE_KEY = 'mon_francais_vocab';
 const REVIEW_INTERVALS = [1, 3, 7, 14, 30]; // Spaced repetition intervals in days
 const DAILY_REVIEW_LIMIT = 50; // Max cards per day
 const DAILY_NEW_LIMIT = 15;    // Max brand-new words introduced per day
+const EXERCISE_SESSION_SIZE = 15; // Words per session in reverse practice / quiz / match
 
 const FALLBACK_MODELS = [
   "gemini-3.1-flash-lite",
@@ -528,12 +529,16 @@ Règles importantes :
   const [isReverseModalOpen, setIsReverseModalOpen] = useState(false);
   const [reverseWord, setReverseWord] = useState<Word | null>(null);
   const [reverseRevealed, setReverseRevealed] = useState(false);
+  const [reverseSession, setReverseSession] = useState({ done: 0, correct: 0 });
+  const [reverseSessionOver, setReverseSessionOver] = useState(false);
 
   // Quiz (word + 4 choices) state
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
   const [quizWord, setQuizWord] = useState<Word | null>(null);
   const [quizOptions, setQuizOptions] = useState<string[]>([]);
   const [quizSelected, setQuizSelected] = useState<string | null>(null);
+  const [quizSession, setQuizSession] = useState({ done: 0, correct: 0 });
+  const [quizSessionOver, setQuizSessionOver] = useState(false);
 
   // Exercise queue ordering:
   // 1. forgotten words (last grade "oublié")
@@ -582,7 +587,7 @@ Règles importantes :
       alert("Il faut au moins 5 mots révisés en mode cartes pour jouer. Révisez d'abord quelques mots !");
       return;
     }
-    const pool = poolCandidates.slice(0, Math.min(10, poolCandidates.length));
+    const pool = poolCandidates.slice(0, Math.min(EXERCISE_SESSION_SIZE, poolCandidates.length));
     const poolIds = new Set(pool.map(w => w.id));
     setExerciseSessionQueue(queue.filter(w => !poolIds.has(w.id)));
 
@@ -669,18 +674,29 @@ Règles importantes :
   };
 
   // ===== Reverse practice: translation shown, recall the French word =====
+  // Sessions are capped at EXERCISE_SESSION_SIZE words; each new session pulls
+  // the NEXT batch from the shared queue (already-seen words never repeat within it).
 
   const startReversePractice = () => {
     const w = pullNextWord(openExerciseQueue());
     if (!w) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
     setReverseWord(w);
     setReverseRevealed(false);
+    setReverseSession({ done: 0, correct: 0 });
+    setReverseSessionOver(false);
     setIsReverseModalOpen(true);
   };
 
-  const nextReverseWord = () => {
+  const nextReverseWord = (wasCorrect: boolean) => {
+    const next = { done: reverseSession.done + 1, correct: reverseSession.correct + (wasCorrect ? 1 : 0) };
+    setReverseSession(next);
+    if (next.done >= EXERCISE_SESSION_SIZE) {
+      setReverseSessionOver(true);
+      setReverseWord(null);
+      return;
+    }
     const w = pullNextWord();
-    if (!w) { setIsReverseModalOpen(false); setReverseWord(null); return; }
+    if (!w) { setReverseSessionOver(true); setReverseWord(null); return; }
     setReverseWord(w);
     setReverseRevealed(false);
   };
@@ -778,15 +794,26 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
   const startQuizGame = () => {
     const w = pullNextWord(openExerciseQueue());
     if (!w) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
+    setQuizSession({ done: 0, correct: 0 });
+    setQuizSessionOver(false);
     setIsQuizModalOpen(true);
     prepareQuizQuestion(w);
   };
 
-  const nextQuizQuestion = () => {
+  // Called after the user answers the current question, with whether it was correct
+  const advanceQuiz = (wasCorrect: boolean) => {
+    const next = { done: quizSession.done + 1, correct: quizSession.correct + (wasCorrect ? 1 : 0) };
+    setQuizSession(next);
+    if (next.done >= EXERCISE_SESSION_SIZE) {
+      setQuizSessionOver(true);
+      setQuizWord(null);
+      return;
+    }
     const w = pullNextWord();
-    if (!w) { setIsQuizModalOpen(false); setQuizWord(null); return; }
+    if (!w) { setQuizSessionOver(true); setQuizWord(null); return; }
     prepareQuizQuestion(w);
   };
+
 
   useEffect(() => {
     if (selectedWordId && selectedTranslationId && !isProcessingMatch) {
@@ -3368,11 +3395,15 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 </div>
 
                 {matchedIds.size === matchPool.length && matchPool.length > 0 && (
-                  <motion.div 
+                  <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="text-center pt-4"
+                    className="text-center pt-4 space-y-3"
                   >
+                    <p className="text-2xl font-black text-slate-900">
+                      {Math.round(((matchPool.length - matchWrongWordIds.current.size) / matchPool.length) * 100)}%
+                      <span className="text-xs font-bold text-slate-400 uppercase tracking-widest ml-2">du premier coup</span>
+                    </p>
                     <button
                       onClick={startMatchGame}
                       className="px-8 py-4 bg-emerald-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-emerald-600 transition-all shadow-lg shadow-emerald-100 flex items-center gap-2 mx-auto"
@@ -3388,7 +3419,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
         )}
 
         {/* Reverse Practice Modal: translation → French */}
-        {isReverseModalOpen && reverseWord && (
+        {isReverseModalOpen && (
           <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[200] flex items-center justify-center p-4 sm:p-6">
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
@@ -3403,13 +3434,13 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   <div>
                     <h3 className="text-xl font-bold text-slate-900">Rappel actif</h3>
                     <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-                      {currentLangObj.flag} → 🇫🇷 · {exerciseSessionQueue.length} mots restants
+                      {reverseSessionOver ? 'Session terminée' : `${currentLangObj.flag} → 🇫🇷 · Mot ${reverseSession.done + 1} sur ${EXERCISE_SESSION_SIZE}`}
                     </p>
                   </div>
                 </div>
                 <button
                   onClick={() => {
-                    setExerciseSessionQueue(prev => [reverseWord, ...prev]);
+                    if (reverseWord) setExerciseSessionQueue(prev => [reverseWord, ...prev]);
                     setIsReverseModalOpen(false);
                     setReverseWord(null);
                   }}
@@ -3419,6 +3450,24 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 </button>
               </div>
 
+              {reverseSessionOver ? (
+                <div className="p-8 flex flex-col items-center gap-6 text-center">
+                  <div className="w-16 h-16 bg-purple-50 text-purple-500 rounded-full flex items-center justify-center">
+                    <CheckCircle2 size={32} />
+                  </div>
+                  <div>
+                    <p className="text-3xl font-black text-slate-900">{Math.round((reverseSession.correct / Math.max(1, reverseSession.done)) * 100)}%</p>
+                    <p className="text-sm text-slate-500 mt-1">{reverseSession.correct} / {reverseSession.done} mots retrouvés</p>
+                  </div>
+                  <button
+                    onClick={startReversePractice}
+                    className="w-full py-3.5 bg-purple-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-purple-700 active:scale-[0.98] transition-all shadow-lg shadow-purple-100 flex items-center justify-center gap-2"
+                  >
+                    <Sparkles size={16} />
+                    Nouvelle session
+                  </button>
+                </div>
+              ) : reverseWord && (
               <div className="p-8 flex flex-col items-center gap-6 text-center">
                 <p className="text-[10px] font-bold uppercase text-purple-400 tracking-widest">Comment dit-on en français ?</p>
                 <h3 className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight break-words">
@@ -3454,14 +3503,14 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
                     <div className="grid grid-cols-2 gap-3">
                       <button
-                        onClick={() => { requeueWord(reverseWord, false); penalizeWordFromExercise(reverseWord.id); recordExerciseActivity(); nextReverseWord(); }}
+                        onClick={() => { requeueWord(reverseWord, false); penalizeWordFromExercise(reverseWord.id); recordExerciseActivity(); nextReverseWord(false); }}
                         className="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-red-100 hover:bg-red-50 transition-colors text-red-500 font-bold text-xs uppercase tracking-widest"
                       >
                         <XCircle size={18} />
                         À revoir
                       </button>
                       <button
-                        onClick={() => { requeueWord(reverseWord, true); recordExerciseActivity(); nextReverseWord(); }}
+                        onClick={() => { requeueWord(reverseWord, true); recordExerciseActivity(); nextReverseWord(true); }}
                         className="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-emerald-100 hover:bg-emerald-50 transition-colors text-emerald-600 font-bold text-xs uppercase tracking-widest"
                       >
                         <CheckCircle2 size={18} />
@@ -3471,12 +3520,13 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   </motion.div>
                 )}
               </div>
+              )}
             </motion.div>
           </div>
         )}
 
         {/* Quiz Modal: French word + 4 translation choices */}
-        {isQuizModalOpen && quizWord && (
+        {isQuizModalOpen && (
           <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[200] flex items-center justify-center p-4 sm:p-6">
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
@@ -3491,13 +3541,13 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   <div>
                     <h3 className="text-xl font-bold text-slate-900">Quiz</h3>
                     <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-                      Choisissez la bonne traduction · {exerciseSessionQueue.length} mots restants
+                      {quizSessionOver ? 'Session terminée' : `Mot ${quizSession.done + 1} sur ${EXERCISE_SESSION_SIZE}`}
                     </p>
                   </div>
                 </div>
                 <button
                   onClick={() => {
-                    if (quizSelected === null) {
+                    if (quizWord && quizSelected === null) {
                       setExerciseSessionQueue(prev => [quizWord, ...prev]);
                     }
                     setIsQuizModalOpen(false);
@@ -3509,6 +3559,24 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 </button>
               </div>
 
+              {quizSessionOver ? (
+                <div className="p-8 flex flex-col items-center gap-6 text-center">
+                  <div className="w-16 h-16 bg-emerald-50 text-emerald-500 rounded-full flex items-center justify-center">
+                    <CheckCircle2 size={32} />
+                  </div>
+                  <div>
+                    <p className="text-3xl font-black text-slate-900">{Math.round((quizSession.correct / Math.max(1, quizSession.done)) * 100)}%</p>
+                    <p className="text-sm text-slate-500 mt-1">{quizSession.correct} / {quizSession.done} bonnes réponses</p>
+                  </div>
+                  <button
+                    onClick={startQuizGame}
+                    className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                  >
+                    <Sparkles size={16} />
+                    Nouvelle session
+                  </button>
+                </div>
+              ) : quizWord && (
               <div className="p-8 flex flex-col items-center gap-6">
                 <div className="flex items-center gap-3">
                   <h3 className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight break-words text-center">
@@ -3546,7 +3614,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                           requeueWord(quizWord, isCorrectOpt);
                           if (!isCorrectOpt) penalizeWordFromExercise(quizWord.id);
                           recordExerciseActivity();
-                          if (isCorrectOpt) setTimeout(nextQuizQuestion, 900);
+                          if (isCorrectOpt) setTimeout(() => advanceQuiz(true), 900);
                         }}
                         className={`w-full p-4 rounded-2xl border-2 font-bold text-sm transition-all text-center ${
                           quizSelected === null
@@ -3568,13 +3636,14 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   <motion.button
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
-                    onClick={nextQuizQuestion}
+                    onClick={() => advanceQuiz(false)}
                     className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
                   >
                     Suivant
                   </motion.button>
                 )}
               </div>
+              )}
             </motion.div>
           </div>
         )}
