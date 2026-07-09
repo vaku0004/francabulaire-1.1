@@ -50,6 +50,13 @@ const DAILY_REVIEW_LIMIT = 50; // Max cards per day
 const DAILY_NEW_LIMIT = 15;    // Max brand-new words introduced per day
 const EXERCISE_SESSION_SIZE = 15; // Words per session in reverse practice / quiz / match
 
+// Exercise words are organized into 3 tiers mirroring flashcard grades.
+// A word graduates one tier on a correct exercise answer, and repeats within
+// its tier (or demotes) on a wrong one. See partitionIntoBuckets/pullFromBuckets/resolveExerciseAnswer.
+type ExTier = 'forgotten' | 'almost' | 'remembered';
+type ExBuckets = Record<ExTier, Word[]>;
+const EMPTY_BUCKETS: ExBuckets = { forgotten: [], almost: [], remembered: [] };
+
 const FALLBACK_MODELS = [
   "gemini-3.1-flash-lite",
   "gemma-4-26b-a4b-it",
@@ -96,7 +103,9 @@ export default function App() {
   // Refs declared at the very top so exercise functions can reliably access them
   const batchWrongWordIds = React.useRef<Set<string>>(new Set());
   const matchWrongWordIds = React.useRef<Set<string>>(new Set());
-  const matchCommitted = React.useRef(false);
+  // Which tier each in-flight word was pulled from, keyed by word id
+  const currentExerciseBatchTiers = React.useRef<Record<string, ExTier>>({});
+  const matchPoolTiers = React.useRef<Record<string, ExTier>>({});
 
   const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
@@ -151,7 +160,7 @@ export default function App() {
 
   const currentGuide = (installGuideContent as any)[targetLanguage] || installGuideContent.Russe;
 
-  const generateStoryExercise = async (queue?: Word[]) => {
+  const generateStoryExercise = async () => {
     if (isStoryLoading) return; // guard against double click
     setIsStoryLoading(true);
     setExerciseFeedback(null);
@@ -164,20 +173,29 @@ export default function App() {
       if (!apiKey) throw new Error("Clé API не найдена.");
       const ai = new GoogleGenAI({ apiKey });
 
-      // Use provided queue or current exerciseSessionQueue.
-      // If the previous batch was skipped without being solved, put its words back at the end.
-      const baseQueue = queue ?? exerciseSessionQueue;
-      const skipped = currentExerciseBatch.filter(w => !baseQueue.some(q => q.id === w.id));
-      const currentQueue = [...baseQueue, ...skipped];
+      // Merge newly-eligible words + return any previous unfinished batch to its tier — commit immediately (safe, non-destructive)
+      let buckets = getOrBuildBuckets();
+      if (currentExerciseBatch.length > 0) {
+        const merged: ExBuckets = { forgotten: [...buckets.forgotten], almost: [...buckets.almost], remembered: [...buckets.remembered] };
+        [...currentExerciseBatch].reverse().forEach(w => {
+          const tier = currentExerciseBatchTiers.current[w.id] || 'almost';
+          merged[tier] = [w, ...merged[tier]];
+        });
+        buckets = merged;
+        setExerciseBuckets(buckets);
+        setCurrentExerciseBatch([]);
+        currentExerciseBatchTiers.current = {};
+      }
 
-      if (currentQueue.length < 5) {
+      // Pull 5 words locally; only commit the removal once generation succeeds
+      const { picked, rest } = pullFromBuckets(buckets, 5);
+      if (picked.length < 5) {
         alert("Il vous faut au moins 5 mots révisés en mode cartes pour générer un exercice. Révisez d'abord quelques mots !");
         setIsStoryLoading(false);
         return;
       }
-
-      // Take first 5 from the session queue (queue is consumed only after a successful AI response)
-      const selectedWords = currentQueue.slice(0, 5);
+      const selectedWords = picked.map(p => p.word);
+      const selectedTiers: Record<string, ExTier> = Object.fromEntries(picked.map(p => [p.word.id, p.tier]));
 
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
@@ -230,9 +248,10 @@ Règles importantes :
         : result.story;
 
       if (story && Array.isArray(result.gaps) && result.gaps.length > 0) {
-        // Consume the queue only now that generation succeeded
-        setExerciseSessionQueue(currentQueue.slice(5));
+        // Consume the buckets only now that generation succeeded
+        setExerciseBuckets(rest);
         setCurrentExerciseBatch(selectedWords);
+        currentExerciseBatchTiers.current = selectedTiers;
         setGeneratedStory({
           title: result.title || 'Complétez les phrases',
           story,
@@ -329,9 +348,10 @@ Règles importantes :
   useEffect(() => {
     localStorage.setItem('target_language', targetLanguage);
     lastFetchedQuery.current = '';
-    // Exercise queue holds words of the previous language — reset it
-    setExerciseSessionQueue([]);
+    // Exercise buckets hold words of the previous language — reset them
+    setExerciseBuckets(EMPTY_BUCKETS);
     setCurrentExerciseBatch([]);
+    currentExerciseBatchTiers.current = {};
     setGeneratedStory(null);
     setExerciseFeedback(null);
     setUserAnswers([]);
@@ -472,33 +492,50 @@ Règles importantes :
   const [isWordListModalOpen, setIsWordListModalOpen] = useState(false);
   const [isTextExerciseModalOpen, setIsTextExerciseModalOpen] = useState(false);
   const [isMatchModalOpen, setIsMatchModalOpen] = useState(false);
-  // Exercise session queue: all reviewed words in priority order
-  const [exerciseSessionQueue, setExerciseSessionQueue] = useState<Word[]>([]);
-  const [currentExerciseBatch, setCurrentExerciseBatch] = useState<Word[]>([]);
+  // Exercise words organized into 3 tiers (forgotten / almost / remembered), shared by all activities
+  const [exerciseBuckets, setExerciseBuckets] = useState<ExBuckets>(EMPTY_BUCKETS);
+  const [currentExerciseBatch, setCurrentExerciseBatch] = useState<Word[]>([]); // text-exercise's in-flight 5-word batch
   const exerciseQueueRestored = React.useRef(false);
 
-  // Restore queue position from the previous session (stored as word ids)
+  // Restore bucket positions from the previous session (stored as word ids per tier)
   useEffect(() => {
     if (!hasLoaded || exerciseQueueRestored.current) return;
     exerciseQueueRestored.current = true;
     try {
-      const saved = JSON.parse(localStorage.getItem('francab_exercise_queue') || 'null');
-      if (saved && saved.lang === targetLanguage && Array.isArray(saved.ids)) {
+      const saved = JSON.parse(localStorage.getItem('francab_exercise_buckets') || 'null');
+      if (saved && saved.lang === targetLanguage && saved.buckets) {
         const byId = new Map(words.map(w => [w.id, w]));
-        const restored = saved.ids
-          .map((id: string) => byId.get(id))
-          .filter(Boolean) as Word[];
-        if (restored.length > 0) setExerciseSessionQueue(restored);
+        const restoreTier = (ids: any): Word[] =>
+          Array.isArray(ids) ? (ids.map((id: string) => byId.get(id)).filter(Boolean) as Word[]) : [];
+        const restored: ExBuckets = {
+          forgotten: restoreTier(saved.buckets.forgotten),
+          almost: restoreTier(saved.buckets.almost),
+          remembered: restoreTier(saved.buckets.remembered),
+        };
+        if (restored.forgotten.length + restored.almost.length + restored.remembered.length > 0) {
+          setExerciseBuckets(restored);
+        }
       }
     } catch { /* corrupt data — start fresh */ }
   }, [hasLoaded, words, targetLanguage]);
 
-  // Persist queue position on every change (unfinished batch words go to the front)
+  // Persist bucket positions on every change (unfinished text-exercise batch words go to the front of their tier)
   useEffect(() => {
     if (!hasLoaded || !exerciseQueueRestored.current) return;
-    const ids = [...currentExerciseBatch.map(w => w.id), ...exerciseSessionQueue.map(w => w.id)];
-    localStorage.setItem('francab_exercise_queue', JSON.stringify({ lang: targetLanguage, ids }));
-  }, [exerciseSessionQueue, currentExerciseBatch, targetLanguage, hasLoaded]);
+    const withBatch: ExBuckets = { forgotten: [...exerciseBuckets.forgotten], almost: [...exerciseBuckets.almost], remembered: [...exerciseBuckets.remembered] };
+    [...currentExerciseBatch].reverse().forEach(w => {
+      const tier = currentExerciseBatchTiers.current[w.id] || 'almost';
+      withBatch[tier] = [w, ...withBatch[tier]];
+    });
+    localStorage.setItem('francab_exercise_buckets', JSON.stringify({
+      lang: targetLanguage,
+      buckets: {
+        forgotten: withBatch.forgotten.map(w => w.id),
+        almost: withBatch.almost.map(w => w.id),
+        remembered: withBatch.remembered.map(w => w.id),
+      },
+    }));
+  }, [exerciseBuckets, currentExerciseBatch, targetLanguage, hasLoaded]);
   const [wordListSearchQuery, setWordListSearchQuery] = useState('');
   const [isStoryLoading, setIsStoryLoading] = useState(false);
   const [generatedStory, setGeneratedStory] = useState<{
@@ -528,6 +565,7 @@ Règles importantes :
   // Reverse practice (translation → French) state
   const [isReverseModalOpen, setIsReverseModalOpen] = useState(false);
   const [reverseWord, setReverseWord] = useState<Word | null>(null);
+  const [reverseTier, setReverseTier] = useState<ExTier | null>(null);
   const [reverseRevealed, setReverseRevealed] = useState(false);
   const [reverseSession, setReverseSession] = useState({ done: 0, correct: 0 });
   const [reverseSessionOver, setReverseSessionOver] = useState(false);
@@ -535,64 +573,159 @@ Règles importantes :
   // Quiz (word + 4 choices) state
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
   const [quizWord, setQuizWord] = useState<Word | null>(null);
+  const [quizTier, setQuizTier] = useState<ExTier | null>(null);
   const [quizOptions, setQuizOptions] = useState<string[]>([]);
   const [quizSelected, setQuizSelected] = useState<string | null>(null);
   const [quizSession, setQuizSession] = useState({ done: 0, correct: 0 });
   const [quizSessionOver, setQuizSessionOver] = useState(false);
 
-  // Exercise queue ordering:
-  // 1. forgotten words (last grade "oublié")
-  // 2. almost-known words + words with exercise errors (last grade "presque")
-  // 3. never-graded-yet words
-  // 4. remembered/mastered words — only after everything else is done
-  // Within each group: today's words first, then weaker (lower review_count) first.
-  const sortByExercisePriority = (arr: Word[]) => {
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    const todayTs = startOfToday.getTime();
-    const rank = (w: Word) =>
-      w.last_grade === 'forgotten' ? 0
-        : w.last_grade === 'almost' ? 1
-        : (w.last_grade === 'remembered' || w.status === 'mastered') ? 3
-        : 2;
-    return [...arr].sort((a, b) => {
-      const ra = rank(a), rb = rank(b);
-      if (ra !== rb) return ra - rb;
-      const ta = a.last_reviewed_at && a.last_reviewed_at >= todayTs ? 0 : 1;
-      const tb = b.last_reviewed_at && b.last_reviewed_at >= todayTs ? 0 : 1;
-      if (ta !== tb) return ta - tb;
-      const pa = (a.status === 'mastered' ? 100 : 0) + (a.review_count ?? 0);
-      const pb = (b.status === 'mastered' ? 100 : 0) + (b.review_count ?? 0);
-      return pa - pb;
-    });
-  };
-
+  // Exercise words are eligible once reviewed at least once in flashcards, for the current language
   const buildExerciseEligible = useCallback(() => {
-    const eligible = words.filter(w => {
+    return words.filter(w => {
       const matchesLang = targetLanguage === 'Russe'
         ? (!w.target_lang || w.target_lang === 'Russe')
         : (w.target_lang === targetLanguage);
       return matchesLang && w.word && w.translation && !!w.last_reviewed_at;
     });
-    return sortByExercisePriority(eligible);
   }, [words, targetLanguage]);
 
-  const startMatchGame = useCallback(() => {
-    // Shared exercise queue: merged and re-sorted by latest grades
-    const queue = openExerciseQueue();
+  // Split eligible words into 3 tiers by their last flashcard grade.
+  // Within a tier: today's words first, then weaker (lower review_count) words first.
+  // Ungraded words (reviewed but never explicitly graded — legacy data) default into "almost".
+  const partitionIntoBuckets = (eligible: Word[]): ExBuckets => {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const todayTs = startOfToday.getTime();
+    const byRecency = (a: Word, b: Word) => {
+      const ta = a.last_reviewed_at && a.last_reviewed_at >= todayTs ? 0 : 1;
+      const tb = b.last_reviewed_at && b.last_reviewed_at >= todayTs ? 0 : 1;
+      if (ta !== tb) return ta - tb;
+      return (a.review_count ?? 0) - (b.review_count ?? 0);
+    };
+    return {
+      forgotten: eligible.filter(w => w.last_grade === 'forgotten').sort(byRecency),
+      almost: eligible.filter(w => w.last_grade !== 'forgotten' && w.last_grade !== 'remembered').sort(byRecency),
+      remembered: eligible.filter(w => w.last_grade === 'remembered').sort(byRecency),
+    };
+  };
 
-    // Pool = next words from the queue that have translations
-    const poolCandidates = queue.filter(w => w.word && w.translation);
-    if (poolCandidates.length < 5) {
+  // Merge newly-eligible words (reviewed since the buckets were last built) into their tier's end.
+  // Buckets are otherwise left untouched — in-session promotions must persist across activities.
+  const getOrBuildBuckets = (): ExBuckets => {
+    const eligible = buildExerciseEligible();
+    const total = exerciseBuckets.forgotten.length + exerciseBuckets.almost.length + exerciseBuckets.remembered.length;
+    let buckets: ExBuckets;
+    if (total === 0) {
+      buckets = partitionIntoBuckets(eligible);
+    } else {
+      const known = new Set([
+        ...exerciseBuckets.forgotten.map(w => w.id),
+        ...exerciseBuckets.almost.map(w => w.id),
+        ...exerciseBuckets.remembered.map(w => w.id),
+      ]);
+      const fresh = eligible.filter(w => !known.has(w.id));
+      if (fresh.length === 0) {
+        buckets = exerciseBuckets;
+      } else {
+        const seeded = partitionIntoBuckets(fresh);
+        buckets = {
+          forgotten: [...exerciseBuckets.forgotten, ...seeded.forgotten],
+          almost: [...exerciseBuckets.almost, ...seeded.almost],
+          remembered: [...exerciseBuckets.remembered, ...seeded.remembered],
+        };
+      }
+    }
+    setExerciseBuckets(buckets);
+    return buckets;
+  };
+
+  // Pure pull: forgotten → almost → remembered, in that order.
+  // If buckets run out mid-pull, rebuilds a fresh cycle from all eligible words
+  // (this is the ONLY way a word can repeat: the whole pool was exhausted).
+  const pullFromBuckets = (buckets: ExBuckets, n: number): { picked: Array<{ word: Word; tier: ExTier }>; rest: ExBuckets } => {
+    let b = buckets;
+    const picked: Array<{ word: Word; tier: ExTier }> = [];
+    const order: ExTier[] = ['forgotten', 'almost', 'remembered'];
+    const takeFrom = (key: ExTier) => {
+      while (picked.length < n && b[key].length > 0) {
+        picked.push({ word: b[key][0], tier: key });
+        b = { ...b, [key]: b[key].slice(1) };
+      }
+    };
+    order.forEach(takeFrom);
+    if (picked.length < n) {
+      const remaining = b.forgotten.length + b.almost.length + b.remembered.length;
+      if (remaining === 0) {
+        const eligible = buildExerciseEligible();
+        const pickedIds = new Set(picked.map(p => p.word.id));
+        const fresh = eligible.filter(w => !pickedIds.has(w.id));
+        if (fresh.length > 0) {
+          b = partitionIntoBuckets(fresh);
+          order.forEach(takeFrom);
+        }
+      }
+    }
+    return { picked, rest: b };
+  };
+
+  const pullWords = (n: number): Array<{ word: Word; tier: ExTier }> => {
+    const buckets = getOrBuildBuckets();
+    const { picked, rest } = pullFromBuckets(buckets, n);
+    setExerciseBuckets(rest);
+    return picked;
+  };
+
+  // Resolve one word's answer in any activity:
+  // - correct → promotes one tier (forgotten→almost→remembered); remembered+correct is simply done for this cycle
+  // - wrong → forgotten/almost repeat within their own tier; remembered demotes to almost
+  // Only wrong answers touch the flashcard schedule (pull next_review_at to tomorrow, step back one level);
+  // correct answers only update the tier label so future cycles seed from the latest progress.
+  const resolveExerciseAnswer = (word: Word, tier: ExTier, wasCorrect: boolean) => {
+    setExerciseBuckets(prev => {
+      if (wasCorrect) {
+        if (tier === 'forgotten') return { ...prev, almost: [...prev.almost, word] };
+        if (tier === 'almost') return { ...prev, remembered: [...prev.remembered, word] };
+        return prev; // remembered + correct: fully cleared this cycle
+      }
+      if (tier === 'remembered') return { ...prev, almost: [...prev.almost, word] };
+      return { ...prev, [tier]: [...prev[tier], word] };
+    });
+
+    const newGrade: ReviewGrade | null = wasCorrect
+      ? (tier === 'forgotten' ? 'almost' : tier === 'almost' ? 'remembered' : null)
+      : (tier === 'remembered' ? 'almost' : tier);
+    if (!newGrade) return;
+
+    setWords(prev => prev.map(w => {
+      if (w.id !== word.id) return w;
+      if (wasCorrect) {
+        return { ...w, last_grade: newGrade }; // label only — exercises don't accelerate SRS scheduling
+      }
+      const DAY = 1000 * 60 * 60 * 24;
+      return {
+        ...w,
+        next_review_at: Math.min(w.next_review_at, Date.now() + DAY),
+        review_count: Math.max(0, (w.review_count ?? 0) - 1),
+        status: w.status === 'mastered' ? 'learning' as const : w.status,
+        last_grade: newGrade,
+      };
+    }));
+  };
+
+  const startMatchGame = useCallback(() => {
+    const buckets = getOrBuildBuckets();
+    const total = buckets.forgotten.length + buckets.almost.length + buckets.remembered.length;
+    if (total < 5) {
       alert("Il faut au moins 5 mots révisés en mode cartes pour jouer. Révisez d'abord quelques mots !");
       return;
     }
-    const pool = poolCandidates.slice(0, Math.min(EXERCISE_SESSION_SIZE, poolCandidates.length));
-    const poolIds = new Set(pool.map(w => w.id));
-    setExerciseSessionQueue(queue.filter(w => !poolIds.has(w.id)));
+    const { picked, rest } = pullFromBuckets(buckets, EXERCISE_SESSION_SIZE);
+    setExerciseBuckets(rest);
+
+    const pool = picked.map(p => p.word);
+    matchPoolTiers.current = Object.fromEntries(picked.map(p => [p.word.id, p.tier]));
 
     matchWrongWordIds.current = new Set();
-    matchCommitted.current = false;
 
     setMatchPool(pool);
     setMatchedIds(new Set());
@@ -608,79 +741,22 @@ Règles importantes :
     setSuccessfullyMatched(null);
     setWrongMatch(null);
     setIsMatchModalOpen(true);
-  }, [buildExerciseEligible, exerciseSessionQueue, currentExerciseBatch]);
-
-  // ===== Shared queue helpers for single-word activities (reverse practice, quiz) =====
-
-  // Merge newly eligible words into the persistent queue and return it
-  const getOrBuildExerciseQueue = (): Word[] => {
-    const eligible = buildExerciseEligible();
-    let queue: Word[];
-    if (exerciseSessionQueue.length === 0 && currentExerciseBatch.length === 0) {
-      queue = eligible;
-    } else {
-      const known = new Set([...exerciseSessionQueue.map(w => w.id), ...currentExerciseBatch.map(w => w.id)]);
-      const additions = eligible.filter(w => !known.has(w.id));
-      queue = additions.length > 0 ? [...exerciseSessionQueue, ...additions] : exerciseSessionQueue;
-    }
-    setExerciseSessionQueue(queue);
-    return queue;
-  };
-
-  // On opening an activity: merge fresh words AND re-sort so latest grades apply
-  // (remembered words sink to the end, forgotten/errored float to the front).
-  // Mid-session pulls do NOT re-sort — the in-session requeue order is preserved.
-  const openExerciseQueue = (): Word[] => {
-    const sorted = sortByExercisePriority(getOrBuildExerciseQueue());
-    setExerciseSessionQueue(sorted);
-    return sorted;
-  };
-
-  const pullNextWord = (fromQueue?: Word[]): Word | null => {
-    const q = fromQueue ?? getOrBuildExerciseQueue();
-    if (q.length === 0) return null;
-    setExerciseSessionQueue(q.slice(1));
-    return q[0];
-  };
-
-  // Correct answers go to the end; wrong ones come back soon (but not immediately)
-  const requeueWord = (w: Word, wasCorrect: boolean) => {
-    setExerciseSessionQueue(prev => wasCorrect
-      ? [...prev, w]
-      : [...prev.slice(0, 2), w, ...prev.slice(2)]);
-  };
-
-  // An error in any activity feeds back into spaced repetition:
-  // the word comes back to flashcards tomorrow (or keeps an earlier date),
-  // steps one level back, and mastered words drop back to learning.
-  // Clean answers do NOT touch the schedule — only real card reviews advance it.
-  const penalizeWordFromExercise = (wordId: string) => {
-    const DAY = 1000 * 60 * 60 * 24;
-    setWords(prev => prev.map(w => {
-      if (w.id !== wordId) return w;
-      return {
-        ...w,
-        next_review_at: Math.min(w.next_review_at, Date.now() + DAY),
-        review_count: Math.max(0, (w.review_count ?? 0) - 1),
-        status: w.status === 'mastered' ? 'learning' as const : w.status,
-        last_grade: 'almost' as const, // exercise error = weak word, stays near queue front
-      };
-    }));
-  };
+  }, [exerciseBuckets, words, targetLanguage]);
 
   const openTextExercise = () => {
-    openExerciseQueue();
+    getOrBuildBuckets();
     setIsTextExerciseModalOpen(true);
   };
 
   // ===== Reverse practice: translation shown, recall the French word =====
   // Sessions are capped at EXERCISE_SESSION_SIZE words; each new session pulls
-  // the NEXT batch from the shared queue (already-seen words never repeat within it).
+  // the NEXT words from the shared buckets (already-seen words never repeat within a cycle).
 
   const startReversePractice = () => {
-    const w = pullNextWord(openExerciseQueue());
-    if (!w) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
-    setReverseWord(w);
+    const [pulled] = pullWords(1);
+    if (!pulled) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
+    setReverseWord(pulled.word);
+    setReverseTier(pulled.tier);
     setReverseRevealed(false);
     setReverseSession({ done: 0, correct: 0 });
     setReverseSessionOver(false);
@@ -693,11 +769,13 @@ Règles importantes :
     if (next.done >= EXERCISE_SESSION_SIZE) {
       setReverseSessionOver(true);
       setReverseWord(null);
+      setReverseTier(null);
       return;
     }
-    const w = pullNextWord();
-    if (!w) { setReverseSessionOver(true); setReverseWord(null); return; }
-    setReverseWord(w);
+    const [pulled] = pullWords(1);
+    if (!pulled) { setReverseSessionOver(true); setReverseWord(null); setReverseTier(null); return; }
+    setReverseWord(pulled.word);
+    setReverseTier(pulled.tier);
     setReverseRevealed(false);
   };
 
@@ -773,8 +851,9 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
     }
   };
 
-  const prepareQuizQuestion = async (w: Word) => {
+  const prepareQuizQuestion = async (w: Word, tier: ExTier) => {
     setQuizWord(w);
+    setQuizTier(tier);
     setQuizOptions([]); // empty = loading state
     setQuizSelected(null);
     const aiOpts = await generateQuizDistractors(w);
@@ -782,22 +861,23 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
       ? [w.translation, ...aiOpts].sort(() => Math.random() - 0.5)
       : buildQuizOptions(w); // offline/quota fallback from the base
     if (opts.length < 4) {
-      setExerciseSessionQueue(prev => [w, ...prev]);
+      setExerciseBuckets(prev => ({ ...prev, [tier]: [w, ...prev[tier]] }));
       alert("Impossible de préparer la question. Réessayez.");
       setIsQuizModalOpen(false);
       setQuizWord(null);
+      setQuizTier(null);
       return;
     }
     setQuizOptions(opts);
   };
 
   const startQuizGame = () => {
-    const w = pullNextWord(openExerciseQueue());
-    if (!w) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
+    const [pulled] = pullWords(1);
+    if (!pulled) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
     setQuizSession({ done: 0, correct: 0 });
     setQuizSessionOver(false);
     setIsQuizModalOpen(true);
-    prepareQuizQuestion(w);
+    prepareQuizQuestion(pulled.word, pulled.tier);
   };
 
   // Called after the user answers the current question, with whether it was correct
@@ -807,11 +887,12 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
     if (next.done >= EXERCISE_SESSION_SIZE) {
       setQuizSessionOver(true);
       setQuizWord(null);
+      setQuizTier(null);
       return;
     }
-    const w = pullNextWord();
-    if (!w) { setQuizSessionOver(true); setQuizWord(null); return; }
-    prepareQuizQuestion(w);
+    const [pulled] = pullWords(1);
+    if (!pulled) { setQuizSessionOver(true); setQuizWord(null); setQuizTier(null); return; }
+    prepareQuizQuestion(pulled.word, pulled.tier);
   };
 
 
@@ -825,15 +906,11 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
 
         setTimeout(() => {
           recordExerciseActivity();
-          // If this was the last pair — commit results to the shared queue:
-          // words with errors go to the front, clean ones to the end
-          const newSize = matchedIds.has(matchedId) ? matchedIds.size : matchedIds.size + 1;
-          if (newSize === matchPool.length && !matchCommitted.current) {
-            matchCommitted.current = true;
-            const wrongWords = matchPool.filter(w => matchWrongWordIds.current.has(w.id));
-            const okWords = matchPool.filter(w => !matchWrongWordIds.current.has(w.id));
-            setExerciseSessionQueue(prev => [...wrongWords, ...prev, ...okWords]);
-            matchWrongWordIds.current.clear();
+          // Resolve this word now: correct if it was never mismatched during this game
+          const wordObj = matchPool.find(w => w.id === matchedId);
+          const tier = matchPoolTiers.current[matchedId];
+          if (wordObj && tier) {
+            resolveExerciseAnswer(wordObj, tier, !matchWrongWordIds.current.has(matchedId));
           }
 
           setMatchedIds(prev => {
@@ -890,11 +967,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
           setIsProcessingMatch(false);
         }, 1500); 
       } else {
-        // WRONG — flag the word whose translation the user failed to pick
-        // (penalize only once per word per game, so misclicks don't pile up)
-        if (!matchWrongWordIds.current.has(selectedWordId)) {
-          penalizeWordFromExercise(selectedWordId);
-        }
+        // WRONG — remember this word had a mismatch; it affects grading once it's finally matched
         matchWrongWordIds.current.add(selectedWordId);
         setIsProcessingMatch(true);
         setWrongMatch({ wordId: selectedWordId, transId: selectedTranslationId });
@@ -2948,8 +3021,12 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     setWords(prev => prev.filter(w => w.id !== idToRemove));
                     setDeletingId(null);
 
-                    // Remove from exercise queues too (they hold copies)
-                    setExerciseSessionQueue(prev => prev.filter(w => w.id !== idToRemove));
+                    // Remove from exercise buckets too (they hold copies)
+                    setExerciseBuckets(prev => ({
+                      forgotten: prev.forgotten.filter(w => w.id !== idToRemove),
+                      almost: prev.almost.filter(w => w.id !== idToRemove),
+                      remembered: prev.remembered.filter(w => w.id !== idToRemove),
+                    }));
                     setCurrentExerciseBatch(prev => prev.filter(w => w.id !== idToRemove));
 
                     if (searchResult && searchResult.id === idToRemove) {
@@ -2996,9 +3073,10 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   <div>
                     <h3 className="text-xl font-bold text-slate-900">Phrases à compléter</h3>
                     <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-                      {exerciseSessionQueue.length + (currentExerciseBatch.length > 0 ? currentExerciseBatch.length : 0) > 0
-                        ? `${exerciseSessionQueue.length} mots restants`
-                        : 'Devinez le mot manquant dans chaque phrase'}
+                      {(() => {
+                        const total = exerciseBuckets.forgotten.length + exerciseBuckets.almost.length + exerciseBuckets.remembered.length + currentExerciseBatch.length;
+                        return total > 0 ? `${total} mots restants` : 'Devinez le mot manquant dans chaque phrase';
+                      })()}
                     </p>
                   </div>
                 </div>
@@ -3215,14 +3293,15 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                               }
                             });
 
-                            // Commit queue update once, when the batch is fully solved
+                            // Resolve each word once the whole batch is solved
                             if (isCorrect) {
-                              const wrongWords = currentExerciseBatch.filter(w => batchWrongWordIds.current.has(w.id));
-                              const okWords = currentExerciseBatch.filter(w => !batchWrongWordIds.current.has(w.id));
-                              setExerciseSessionQueue(prev => [...wrongWords, ...prev, ...okWords]);
-                              wrongWords.forEach(w => penalizeWordFromExercise(w.id));
+                              currentExerciseBatch.forEach(w => {
+                                const tier = currentExerciseBatchTiers.current[w.id] || 'almost';
+                                resolveExerciseAnswer(w, tier, !batchWrongWordIds.current.has(w.id));
+                              });
                               batchWrongWordIds.current.clear();
                               setCurrentExerciseBatch([]);
+                              currentExerciseBatchTiers.current = {};
                               recordExerciseActivity(generatedStory.gaps.length);
                             }
                           }}
@@ -3271,14 +3350,19 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 </div>
                 <button
                   onClick={() => {
-                    // Mid-game close: return unfinished words to the queue
-                    if (matchPool.length > 0 && matchedIds.size < matchPool.length && !matchCommitted.current) {
+                    // Mid-game close: already-matched words were resolved live; return the rest to their tier buckets
+                    if (matchPool.length > 0 && matchedIds.size < matchPool.length) {
                       const unmatched = matchPool.filter(w => !matchedIds.has(w.id));
-                      const doneWrong = matchPool.filter(w => matchedIds.has(w.id) && matchWrongWordIds.current.has(w.id));
-                      const doneOk = matchPool.filter(w => matchedIds.has(w.id) && !matchWrongWordIds.current.has(w.id));
-                      setExerciseSessionQueue(prev => [...unmatched, ...doneWrong, ...prev, ...doneOk]);
-                      matchWrongWordIds.current.clear();
+                      setExerciseBuckets(prev => {
+                        const next: ExBuckets = { forgotten: [...prev.forgotten], almost: [...prev.almost], remembered: [...prev.remembered] };
+                        [...unmatched].reverse().forEach(w => {
+                          const tier = matchPoolTiers.current[w.id] || 'almost';
+                          next[tier] = [w, ...next[tier]];
+                        });
+                        return next;
+                      });
                     }
+                    matchWrongWordIds.current.clear();
                     setMatchPool([]);
                     setIsMatchModalOpen(false);
                   }}
@@ -3440,9 +3524,12 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 </div>
                 <button
                   onClick={() => {
-                    if (reverseWord) setExerciseSessionQueue(prev => [reverseWord, ...prev]);
+                    if (reverseWord && reverseTier) {
+                      setExerciseBuckets(prev => ({ ...prev, [reverseTier]: [reverseWord, ...prev[reverseTier]] }));
+                    }
                     setIsReverseModalOpen(false);
                     setReverseWord(null);
+                    setReverseTier(null);
                   }}
                   className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
                 >
@@ -3503,14 +3590,14 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
                     <div className="grid grid-cols-2 gap-3">
                       <button
-                        onClick={() => { requeueWord(reverseWord, false); penalizeWordFromExercise(reverseWord.id); recordExerciseActivity(); nextReverseWord(false); }}
+                        onClick={() => { if (reverseTier) resolveExerciseAnswer(reverseWord, reverseTier, false); recordExerciseActivity(); nextReverseWord(false); }}
                         className="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-red-100 hover:bg-red-50 transition-colors text-red-500 font-bold text-xs uppercase tracking-widest"
                       >
                         <XCircle size={18} />
                         À revoir
                       </button>
                       <button
-                        onClick={() => { requeueWord(reverseWord, true); recordExerciseActivity(); nextReverseWord(true); }}
+                        onClick={() => { if (reverseTier) resolveExerciseAnswer(reverseWord, reverseTier, true); recordExerciseActivity(); nextReverseWord(true); }}
                         className="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-emerald-100 hover:bg-emerald-50 transition-colors text-emerald-600 font-bold text-xs uppercase tracking-widest"
                       >
                         <CheckCircle2 size={18} />
@@ -3547,11 +3634,12 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 </div>
                 <button
                   onClick={() => {
-                    if (quizWord && quizSelected === null) {
-                      setExerciseSessionQueue(prev => [quizWord, ...prev]);
+                    if (quizWord && quizTier && quizSelected === null) {
+                      setExerciseBuckets(prev => ({ ...prev, [quizTier]: [quizWord, ...prev[quizTier]] }));
                     }
                     setIsQuizModalOpen(false);
                     setQuizWord(null);
+                    setQuizTier(null);
                   }}
                   className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
                 >
@@ -3611,8 +3699,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                         disabled={quizSelected !== null}
                         onClick={() => {
                           setQuizSelected(opt);
-                          requeueWord(quizWord, isCorrectOpt);
-                          if (!isCorrectOpt) penalizeWordFromExercise(quizWord.id);
+                          if (quizTier) resolveExerciseAnswer(quizWord, quizTier, isCorrectOpt);
                           recordExerciseActivity();
                           if (isCorrectOpt) setTimeout(() => advanceQuiz(true), 900);
                         }}
