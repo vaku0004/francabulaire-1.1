@@ -2273,14 +2273,14 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                       lastFetchedQuery.current = '';
                     }}
                     onKeyDown={(e) => e.key === 'Enter' && triggerSearch()}
-                    className="w-full pl-10 pr-24 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all font-medium"
+                    className="w-full pl-12 pr-24 py-4 bg-white border-2 border-indigo-300 rounded-2xl shadow-md shadow-indigo-100/60 focus:ring-4 focus:ring-indigo-200/60 focus:border-indigo-500 outline-none transition-all font-semibold text-base placeholder:text-slate-400 placeholder:font-normal"
                   />
                   <button
                     onClick={triggerSearch}
-                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-500 transition-colors"
+                    className="absolute left-4 top-1/2 -translate-y-1/2 text-indigo-400 hover:text-indigo-600 transition-colors"
                     title="Rechercher"
                   >
-                    <Search size={18} />
+                    <Search size={20} />
                   </button>
                   
                   <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
@@ -2488,10 +2488,76 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <p className="text-sm font-medium text-slate-500">Recherche en cours...</p>
                   </motion.div>
                 ) : (
-                  <div className="text-center py-12 space-y-3 opacity-40">
-                    <Search size={32} className="mx-auto text-slate-300" />
-                    <p className="text-sm font-medium text-slate-500">Entrez un mot pour le traduire et l'ajouter automatiquement à votre base.</p>
-                  </div>
+                  (() => {
+                    const langWords = words.filter(w => targetLanguage === 'Russe'
+                      ? (!w.target_lang || w.target_lang === 'Russe')
+                      : w.target_lang === targetLanguage);
+                    const forgotten = langWords.filter(w => w.last_grade === 'forgotten').length;
+                    const almost = langWords.filter(w => w.last_grade === 'almost').length;
+                    const remembered = langWords.filter(w => w.last_grade === 'remembered' || w.status === 'mastered').length;
+                    const fresh = Math.max(0, langWords.length - forgotten - almost - remembered);
+                    const total = Math.max(1, langWords.length);
+                    return (
+                      <motion.div key="stats" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-5 pt-1">
+                        <p className="text-xs text-slate-400 font-medium text-center">
+                          Entrez un mot français ou {currentLangObj.name.toLowerCase()} — il sera traduit et ajouté à votre base.
+                        </p>
+
+                        <div className="grid grid-cols-3 gap-2.5">
+                          <div className="p-3 bg-white/80 border border-indigo-100 rounded-2xl text-center shadow-sm">
+                            <p className="text-2xl font-black text-slate-900">{langWords.length}</p>
+                            <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">Mots</p>
+                          </div>
+                          <div className="p-3 bg-white/80 border border-emerald-100 rounded-2xl text-center shadow-sm">
+                            <p className="text-2xl font-black text-emerald-600">{masteredCount}</p>
+                            <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">Appris</p>
+                          </div>
+                          <div className="p-3 bg-white/80 border border-orange-100 rounded-2xl text-center shadow-sm">
+                            <p className="text-2xl font-black text-orange-500">🔥{streak}</p>
+                            <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">Jours</p>
+                          </div>
+                        </div>
+
+                        <div className="p-4 bg-white/80 border border-indigo-100 rounded-2xl shadow-sm space-y-2">
+                          <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest">
+                            <span className="text-slate-400">Aujourd'hui</span>
+                            <span className="text-indigo-600">{dailyStats.reviewedToday} / {dailyStats.totalToday} cartes</span>
+                          </div>
+                          <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+                            <motion.div
+                              initial={false}
+                              animate={{ width: `${dailyStats.progress}%` }}
+                              className="h-full bg-indigo-500 rounded-full"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="p-4 bg-white/80 border border-indigo-100 rounded-2xl shadow-sm space-y-3">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">État de la mémoire</p>
+                          <div className="h-2.5 w-full rounded-full overflow-hidden flex">
+                            {forgotten > 0 && <div className="h-full bg-red-400" style={{ width: `${(forgotten / total) * 100}%` }} />}
+                            {almost > 0 && <div className="h-full bg-amber-400" style={{ width: `${(almost / total) * 100}%` }} />}
+                            {remembered > 0 && <div className="h-full bg-emerald-400" style={{ width: `${(remembered / total) * 100}%` }} />}
+                            {fresh > 0 && <div className="h-full bg-slate-200" style={{ width: `${(fresh / total) * 100}%` }} />}
+                          </div>
+                          <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                            <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500">
+                              <span className="w-2.5 h-2.5 bg-red-400 rounded-sm inline-block" /> Oublié {forgotten}
+                            </span>
+                            <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500">
+                              <span className="w-2.5 h-2.5 bg-amber-400 rounded-sm inline-block" /> Presque {almost}
+                            </span>
+                            <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500">
+                              <span className="w-2.5 h-2.5 bg-emerald-400 rounded-sm inline-block" /> Retenu {remembered}
+                            </span>
+                            <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500">
+                              <span className="w-2.5 h-2.5 bg-slate-200 rounded-sm inline-block" /> Nouveau {fresh}
+                            </span>
+                          </div>
+                        </div>
+                      </motion.div>
+                    );
+                  })()
                 )}
               </AnimatePresence>
             </div>
