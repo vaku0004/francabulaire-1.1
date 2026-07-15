@@ -2235,7 +2235,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               Dictionnaire Intelligent
             </h2>
 
-            <div className="bg-gradient-to-br from-indigo-50 via-white to-purple-50 border-2 border-indigo-200 rounded-3xl p-6 shadow-md shadow-indigo-100/50 space-y-6 flex-1">
+            <div className="bg-gradient-to-br from-indigo-50 via-white to-purple-50 border-2 border-indigo-200 rounded-3xl p-6 shadow-md shadow-indigo-100/50 space-y-6 flex-1 flex flex-col">
               <div className="space-y-3">
                 <AnimatePresence>
                   {showAccents && (
@@ -2308,11 +2308,6 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     )}
                   </div>
                 </div>
-
-                <p className="text-xs text-indigo-400/80 font-medium text-center flex items-center justify-center gap-1.5">
-                  <Sparkles size={13} />
-                  Découvrez la traduction — mot ou phrase, français ou {currentLangObj.name.toLowerCase()}
-                </p>
               </div>
 
               <AnimatePresence mode="wait">
@@ -2503,7 +2498,16 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     const fresh = Math.max(0, langWords.length - forgotten - almost - remembered);
                     const total = Math.max(1, langWords.length);
                     return (
-                      <motion.div key="stats" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="pt-1">
+                      <motion.div key="stats" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex-1 flex flex-col pt-1">
+                        {/* Hint centered in the free space */}
+                        <div className="flex-1 flex items-center justify-center py-8">
+                          <p className="text-sm text-indigo-400/80 font-medium text-center flex items-center justify-center gap-2 max-w-xs">
+                            <Sparkles size={16} className="shrink-0" />
+                            Découvrez la traduction — mot ou phrase, français ou {currentLangObj.name.toLowerCase()}
+                          </p>
+                        </div>
+
+                        {/* Memory-state bar pinned to the bottom */}
                         <div className="p-4 bg-white/80 border border-indigo-100 rounded-2xl shadow-sm space-y-3">
                           <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">État de la mémoire</p>
                           <div className="h-2.5 w-full rounded-full overflow-hidden flex">
