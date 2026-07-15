@@ -46,10 +46,15 @@ import { doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
 // Heavy file-parsing libraries (xlsx, mammoth, pdfjs-dist) are lazy-loaded in handleFileUpload
 
 const STORAGE_KEY = 'mon_francais_vocab';
-const REVIEW_INTERVALS = [1, 3, 7, 14, 30]; // Spaced repetition intervals in days
+// Strict day ladder: a new word is first shown ~10 minutes after being added (learning step),
+// then each successful review advances: 1d -> 3d -> 7d -> 14d -> 30d -> mastered (maintenance 60/120/240/365d).
+// REVIEW_INTERVALS[review_count] = days until the next review after the (count+1)-th success.
+const REVIEW_INTERVALS = [1, 3, 7, 14, 30];
+const NEW_WORD_FIRST_DELAY = 10 * 60 * 1000; // learning step: first review 10 min after adding
 const DAILY_REVIEW_LIMIT = 50; // Max cards per day
 const DAILY_NEW_LIMIT = 15;    // Max brand-new words introduced per day
-const EXERCISE_SESSION_SIZE = 15; // Words per session in reverse practice / quiz / match
+const EXERCISE_SESSION_SIZE = 15; // Words per session in reverse practice / quiz / match / typing
+const COMPOSE_SESSION_SIZE = 5;   // Words per session in the compose-a-sentence activity
 
 // Exercise words are organized into 3 tiers mirroring flashcard grades.
 // A word graduates one tier on a correct exercise answer, and repeats within
@@ -580,6 +585,25 @@ Règles importantes :
   const [quizSession, setQuizSession] = useState({ done: 0, correct: 0 });
   const [quizSessionOver, setQuizSessionOver] = useState(false);
 
+  // Typing activity: translation shown, type the French word
+  const [isTypingModalOpen, setIsTypingModalOpen] = useState(false);
+  const [typingWord, setTypingWord] = useState<Word | null>(null);
+  const [typingTier, setTypingTier] = useState<ExTier | null>(null);
+  const [typingInput, setTypingInput] = useState('');
+  const [typingResult, setTypingResult] = useState<'correct' | 'wrong' | null>(null);
+  const [typingSession, setTypingSession] = useState({ done: 0, correct: 0 });
+  const [typingSessionOver, setTypingSessionOver] = useState(false);
+
+  // Compose activity: write your own sentence with the word, AI checks it
+  const [isComposeModalOpen, setIsComposeModalOpen] = useState(false);
+  const [composeWord, setComposeWord] = useState<Word | null>(null);
+  const [composeTier, setComposeTier] = useState<ExTier | null>(null);
+  const [composeInput, setComposeInput] = useState('');
+  const [composeChecking, setComposeChecking] = useState(false);
+  const [composeFeedback, setComposeFeedback] = useState<{ wordOk: boolean; corrected: string; feedback: string } | null>(null);
+  const [composeSession, setComposeSession] = useState({ done: 0, correct: 0 });
+  const [composeSessionOver, setComposeSessionOver] = useState(false);
+
   // Combo session: chains Rappel actif (15) → Relier les mots (15) → Quiz (15) → Phrases à compléter (5) = 50 words
   type ComboPhase = 'reverse' | 'match' | 'quiz' | 'text';
   const [comboMode, setComboMode] = useState<ComboPhase | null>(null);
@@ -907,6 +931,117 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
     prepareQuizQuestion(pulled.word, pulled.tier);
   };
 
+  // ===== Typing activity: translation shown, type the French word (production practice) =====
+
+  const startTypingActivity = () => {
+    const [pulled] = pullWords(1);
+    if (!pulled) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
+    setTypingWord(pulled.word);
+    setTypingTier(pulled.tier);
+    setTypingInput('');
+    setTypingResult(null);
+    setTypingSession({ done: 0, correct: 0 });
+    setTypingSessionOver(false);
+    setIsTypingModalOpen(true);
+  };
+
+  const checkTypingAnswer = () => {
+    if (!typingWord || typingResult !== null || !typingInput.trim()) return;
+    const norm = (s: string) => normalizeWord(stripArticles(s));
+    const ok = norm(typingInput) === norm(typingWord.word);
+    setTypingResult(ok ? 'correct' : 'wrong');
+    if (typingTier) resolveExerciseAnswer(typingWord, typingTier, ok);
+    recordExerciseActivity();
+    speak(typingWord.word);
+    if (ok) setTimeout(() => nextTypingWord(true), 1200);
+  };
+
+  const nextTypingWord = (wasCorrect: boolean) => {
+    const next = { done: typingSession.done + 1, correct: typingSession.correct + (wasCorrect ? 1 : 0) };
+    setTypingSession(next);
+    if (next.done >= EXERCISE_SESSION_SIZE) {
+      setTypingSessionOver(true);
+      setTypingWord(null);
+      setTypingTier(null);
+      return;
+    }
+    const [pulled] = pullWords(1);
+    if (!pulled) { setTypingSessionOver(true); setTypingWord(null); setTypingTier(null); return; }
+    setTypingWord(pulled.word);
+    setTypingTier(pulled.tier);
+    setTypingInput('');
+    setTypingResult(null);
+  };
+
+  // ===== Compose activity: write your own sentence with the word, AI verifies usage =====
+
+  const startComposeActivity = () => {
+    const [pulled] = pullWords(1);
+    if (!pulled) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
+    setComposeWord(pulled.word);
+    setComposeTier(pulled.tier);
+    setComposeInput('');
+    setComposeFeedback(null);
+    setComposeSession({ done: 0, correct: 0 });
+    setComposeSessionOver(false);
+    setIsComposeModalOpen(true);
+  };
+
+  const checkComposeSentence = async () => {
+    if (!composeWord || composeChecking || composeFeedback || composeInput.trim().length < 3) return;
+    setComposeChecking(true);
+    try {
+      const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
+      if (!apiKey) throw new Error("Clé API introuvable");
+      const ai = new GoogleGenAI({ apiKey });
+      const response = await generateWithFallback(ai, {
+        contents: `Tu es un professeur de français bienveillant. L'apprenant étudie le mot "${composeWord.word}" (traduction : "${composeWord.translation}").
+Il a écrit cette phrase pour s'entraîner : "${composeInput.trim()}"
+
+Évalue :
+1. "wordOk" : le mot "${composeWord.word}" (ou sa forme conjuguée/accordée) est-il présent ET utilisé avec le bon sens dans la phrase ?
+2. "corrected" : la phrase corrigée (orthographe, grammaire, naturel). Si la phrase est déjà parfaite, recopie-la telle quelle.
+3. "feedback" : 1-2 phrases d'explication en ${currentLangObj.aiName} — ce qui est bien et ce qu'il faut corriger.
+
+Réponds UNIQUEMENT avec un JSON brut, sans markdown :
+{"wordOk": true, "corrected": "...", "feedback": "..."}`,
+        config: {}
+      });
+      const result = JSON.parse(extractJson(response) || '{}');
+      if (typeof result.wordOk !== 'boolean') throw new Error('bad response');
+      setComposeFeedback({
+        wordOk: result.wordOk,
+        corrected: result.corrected || composeInput.trim(),
+        feedback: result.feedback || '',
+      });
+      if (composeTier) resolveExerciseAnswer(composeWord, composeTier, result.wordOk);
+      recordExerciseActivity();
+    } catch (e) {
+      console.error('Compose check error:', e);
+      alert("Erreur de vérification. Réessayez.");
+    } finally {
+      setComposeChecking(false);
+    }
+  };
+
+  const nextComposeWord = () => {
+    const wasCorrect = !!composeFeedback?.wordOk;
+    const next = { done: composeSession.done + 1, correct: composeSession.correct + (wasCorrect ? 1 : 0) };
+    setComposeSession(next);
+    if (next.done >= COMPOSE_SESSION_SIZE) {
+      setComposeSessionOver(true);
+      setComposeWord(null);
+      setComposeTier(null);
+      return;
+    }
+    const [pulled] = pullWords(1);
+    if (!pulled) { setComposeSessionOver(true); setComposeWord(null); setComposeTier(null); return; }
+    setComposeWord(pulled.word);
+    setComposeTier(pulled.tier);
+    setComposeInput('');
+    setComposeFeedback(null);
+  };
+
   // ===== Combo session: runs all 4 activities back-to-back on the same 50-word batch =====
 
   const startComboSession = () => {
@@ -1227,9 +1362,9 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
   // Daily review queue with a single shared limit:
   // - max DAILY_REVIEW_LIMIT cards per day (retries + scheduled reviews + new words all share it)
   // - of which max DAILY_NEW_LIMIT brand-new words
-  // - retries ("forgotten" earlier today) get top priority but still count toward the limit,
-  //   so the queue length always matches the remaining daily budget shown in the nav bar
-  const reviewQueue = useMemo(() => {
+  // - ORDER: most-overdue first. A word due 5 days ago is on the edge of being lost and
+  //   must come before everything else; new words enter ONLY when the review backlog fits today.
+  const { reviewQueue, overdueCount } = useMemo(() => {
     const now = Date.now();
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
@@ -1240,19 +1375,15 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
       : (w.target_lang === targetLanguage);
 
     // Mastered words are included too: they get rare maintenance reviews when due
-    // (their high review_count sorts them to the lowest priority automatically)
     const due = words.filter(w => matchesLang(w) && w.next_review_at <= now);
 
-    // Lower review_count = more forgotten = higher priority; then earlier due date
-    const byPriority = (a: Word, b: Word) => {
-      const diff = (a.review_count ?? 0) - (b.review_count ?? 0);
-      return diff !== 0 ? diff : a.next_review_at - b.next_review_at;
-    };
+    // Most overdue first — the closer a word is to being forgotten, the sooner it must appear
+    const byOverdue = (a: Word, b: Word) => a.next_review_at - b.next_review_at;
 
     // Same-day retries ("forgotten" earlier today, due again in 1h) — highest priority
-    const retries = due.filter(w => w.last_reviewed_at && w.last_reviewed_at >= todayTs).sort(byPriority);
-    // Seen words due for a scheduled review
-    const seenDue = due.filter(w => w.last_reviewed_at && w.last_reviewed_at < todayTs).sort(byPriority);
+    const retries = due.filter(w => w.last_reviewed_at && w.last_reviewed_at >= todayTs).sort(byOverdue);
+    // Seen words due for a scheduled review, most overdue first
+    const seenDue = due.filter(w => w.last_reviewed_at && w.last_reviewed_at < todayTs).sort(byOverdue);
     // Brand-new words never shown before (oldest added first)
     const newWords = due.filter(w => !w.last_reviewed_at).sort((a, b) => a.created_at - b.created_at);
 
@@ -1273,11 +1404,14 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
     queue.push(...seenTake);
     budget -= seenTake.length;
 
-    // Finally new words, capped by both the shared budget and the daily-new limit
+    // New words enter only when the whole review backlog fits in today's budget
     const newBudget = Math.min(budget, Math.max(0, DAILY_NEW_LIMIT - newIntroducedToday));
     queue.push(...newWords.slice(0, newBudget));
 
-    return queue;
+    // Review debt: due words that did NOT fit into today's limit
+    const debt = (retries.length - retryTake.length) + (seenDue.length - seenTake.length);
+
+    return { reviewQueue: queue, overdueCount: debt };
   }, [words, isReviewing, targetLanguage, clockTick]);
 
   const currentWord = sessionQueue[currentReviewIndex];
@@ -1432,7 +1566,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
           exampleTranslation: result.exampleTranslation,
           tags: 'Auto-added',
           created_at: Date.now(),
-          next_review_at: Date.now() + (1000 * 60 * 60 * 24),
+          next_review_at: Date.now() + NEW_WORD_FIRST_DELAY, // learning step: first review in ~10 min
           status: 'new',
           review_count: 0
         };
@@ -1533,15 +1667,14 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
         const DAY = 1000 * 60 * 60 * 24;
 
         if (grade === 'remembered') {
-          // Follow the 1-3-7-14-30 days scheme, then maintenance reviews with doubling intervals
-          if (reviewCount < REVIEW_INTERVALS.length - 1) {
-            const nextIntervalDays = REVIEW_INTERVALS[reviewCount + 1];
-            nextReview += DAY * nextIntervalDays;
+          // Strict day ladder: success #1 -> 1d, #2 -> 3d, #3 -> 7d, #4 -> 14d, #5 -> 30d,
+          // then mastered with maintenance reviews (60d -> 120d -> 240d -> capped at 365d).
+          // Existing words keep their review_count as-is — nothing is reset by this scheme.
+          if (reviewCount < REVIEW_INTERVALS.length) {
+            nextReview += DAY * REVIEW_INTERVALS[reviewCount];
             status = 'learning';
           } else {
-            // Mastered — but memory still fades: keep rare maintenance reviews
-            // review_count 4 -> next in 60d, 5 -> 120d, 6 -> 240d, then capped at 365d
-            const maintenanceDays = Math.min(365, 30 * Math.pow(2, reviewCount - 3));
+            const maintenanceDays = Math.min(365, 30 * Math.pow(2, reviewCount - (REVIEW_INTERVALS.length - 1)));
             nextReview += DAY * maintenanceDays;
             status = 'mastered';
           }
@@ -1623,7 +1756,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
           target_lang: targetLanguage,
           tags: 'Imported',
           created_at: Date.now(),
-          next_review_at: Date.now() + (1000 * 60 * 60 * 24), // First review in 1 day
+          next_review_at: Date.now() + NEW_WORD_FIRST_DELAY, // learning step: first review in ~10 min
           status: 'new',
           review_count: 0
         }));
@@ -1750,6 +1883,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               <div className="flex justify-between text-[10px] font-bold uppercase tracking-tighter">
                 <span className="text-slate-400">Progression Quotidienne</span>
                 <span className="flex items-center gap-2">
+                  {overdueCount > 0 && <span className="text-red-500" title={`${overdueCount} révisions en retard — les nouveaux mots attendent que ce retard soit rattrapé`}>⏰ {overdueCount}</span>}
                   {streak > 0 && <span className="text-orange-500" title={`${streak} jours d'affilée`}>🔥 {streak}</span>}
                   <span className="text-indigo-600">{dailyStats.reviewedToday} / {dailyStats.totalToday}</span>
                 </span>
@@ -1983,6 +2117,12 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               <button onClick={startQuizGame} className="w-11 h-11 bg-white border-2 border-emerald-100 text-emerald-500 rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Quiz">
                 <CheckCircle2 size={20} />
               </button>
+              <button onClick={startTypingActivity} className="w-11 h-11 bg-white border-2 border-amber-100 text-amber-500 rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Écrivez le mot">
+                <Keyboard size={20} />
+              </button>
+              <button onClick={startComposeActivity} className="w-11 h-11 bg-white border-2 border-rose-100 text-rose-500 rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Composez une phrase">
+                <Edit2 size={20} />
+              </button>
               <button onClick={startComboSession} className="w-11 h-11 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Session complète : les 4 activités à la suite">
                 <Zap size={20} />
               </button>
@@ -2018,6 +2158,20 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   title="Quiz : choisissez la bonne traduction"
                 >
                   <CheckCircle2 size={20} />
+                </button>
+                <button
+                  onClick={startTypingActivity}
+                  className="w-11 h-11 bg-white border-2 border-amber-100 text-amber-500 rounded-xl flex items-center justify-center shadow-md hover:bg-amber-50 hover:border-amber-300 hover:scale-105 transition-all active:scale-95"
+                  title="Écrivez le mot : tapez le mot français"
+                >
+                  <Keyboard size={20} />
+                </button>
+                <button
+                  onClick={startComposeActivity}
+                  className="w-11 h-11 bg-white border-2 border-rose-100 text-rose-500 rounded-xl flex items-center justify-center shadow-md hover:bg-rose-50 hover:border-rose-300 hover:scale-105 transition-all active:scale-95"
+                  title="Composez une phrase avec le mot — l'IA vérifie"
+                >
+                  <Edit2 size={20} />
                 </button>
                 <button
                   onClick={startComboSession}
@@ -3873,6 +4027,267 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   >
                     Suivant
                   </motion.button>
+                )}
+              </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+
+        {/* Typing Modal: type the French word from its translation */}
+        {isTypingModalOpen && (
+          <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[200] flex items-center justify-center p-4 sm:p-6">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-amber-50 text-amber-600 rounded-xl">
+                    <Keyboard size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-slate-900">Écrivez le mot</h3>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                      {typingSessionOver ? 'Session terminée' : `Mot ${typingSession.done + 1} sur ${EXERCISE_SESSION_SIZE}`}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    if (typingWord && typingTier && typingResult === null) {
+                      setExerciseBuckets(prev => ({ ...prev, [typingTier]: [typingWord, ...prev[typingTier]] }));
+                    }
+                    setIsTypingModalOpen(false);
+                    setTypingWord(null);
+                    setTypingTier(null);
+                  }}
+                  className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {typingSessionOver ? (
+                <div className="p-8 flex flex-col items-center gap-6 text-center">
+                  <div className="w-16 h-16 bg-amber-50 text-amber-500 rounded-full flex items-center justify-center">
+                    <CheckCircle2 size={32} />
+                  </div>
+                  <div>
+                    <p className="text-3xl font-black text-slate-900">{Math.round((typingSession.correct / Math.max(1, typingSession.done)) * 100)}%</p>
+                    <p className="text-sm text-slate-500 mt-1">{typingSession.correct} / {typingSession.done} mots écrits correctement</p>
+                  </div>
+                  <button
+                    onClick={startTypingActivity}
+                    className="w-full py-3.5 bg-amber-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-amber-600 active:scale-[0.98] transition-all shadow-lg shadow-amber-100 flex items-center justify-center gap-2"
+                  >
+                    <Sparkles size={16} />
+                    Nouvelle session
+                  </button>
+                </div>
+              ) : typingWord && (
+              <div className="p-8 flex flex-col items-center gap-5 text-center">
+                <p className="text-[10px] font-bold uppercase text-amber-500 tracking-widest">Écrivez en français :</p>
+                <h3 className="text-3xl font-black text-slate-900 tracking-tight break-words">
+                  {typingWord.translation}
+                </h3>
+
+                <div className="w-full space-y-3">
+                  <input
+                    type="text"
+                    autoFocus
+                    value={typingInput}
+                    onChange={(e) => setTypingInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && (typingResult === null ? checkTypingAnswer() : typingResult === 'wrong' && nextTypingWord(false))}
+                    disabled={typingResult !== null}
+                    placeholder="Tapez le mot français..."
+                    className={`w-full px-4 py-3.5 border-2 rounded-2xl outline-none transition-all font-semibold text-lg text-center ${
+                      typingResult === 'correct'
+                        ? 'bg-emerald-50 border-emerald-400 text-emerald-700'
+                        : typingResult === 'wrong'
+                          ? 'bg-red-50 border-red-300 text-red-600'
+                          : 'bg-white border-amber-300 focus:border-amber-500 focus:ring-4 focus:ring-amber-100'
+                    }`}
+                  />
+
+                  <div className="flex flex-wrap justify-center gap-1">
+                    {['é', 'è', 'ê', 'à', 'â', 'ç', 'î', 'ô', 'û', 'ù', 'ë', 'œ'].map(char => (
+                      <button
+                        key={char}
+                        disabled={typingResult !== null}
+                        onClick={() => setTypingInput(prev => prev + char)}
+                        className="w-8 h-8 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-600 hover:bg-amber-50 hover:border-amber-300 transition-colors disabled:opacity-40"
+                      >
+                        {char}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {typingResult === 'wrong' && (
+                  <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="w-full space-y-3">
+                    <div className="p-4 bg-emerald-50 border-2 border-emerald-200 rounded-2xl flex items-center justify-center gap-3">
+                      <p className="text-xl font-bold text-emerald-700">
+                        {getWordWithArticle(typingWord.word, typingWord.gender, typingWord.isPlural)}
+                      </p>
+                      <button
+                        onClick={() => speak(typingWord.word)}
+                        className="p-1.5 bg-emerald-100 text-emerald-600 rounded-full hover:bg-emerald-200 transition-colors"
+                        title="Écouter"
+                      >
+                        <Volume2 size={16} />
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => nextTypingWord(false)}
+                      className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
+                    >
+                      Suivant
+                    </button>
+                  </motion.div>
+                )}
+
+                {typingResult === null && (
+                  <button
+                    onClick={checkTypingAnswer}
+                    disabled={!typingInput.trim()}
+                    className={`w-full py-3.5 rounded-2xl font-bold text-sm uppercase tracking-widest transition-all shadow-lg ${
+                      typingInput.trim()
+                        ? 'bg-amber-500 text-white hover:bg-amber-600 active:scale-[0.98] shadow-amber-100'
+                        : 'bg-slate-100 text-slate-400 shadow-none cursor-not-allowed'
+                    }`}
+                  >
+                    Vérifier
+                  </button>
+                )}
+              </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+
+        {/* Compose Modal: write a sentence with the word, AI checks it */}
+        {isComposeModalOpen && (
+          <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[200] flex items-center justify-center p-4 sm:p-6">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col overflow-hidden max-h-[90vh] overflow-y-auto"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-rose-50 text-rose-600 rounded-xl">
+                    <Edit2 size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-slate-900">Composez une phrase</h3>
+                    <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                      {composeSessionOver ? 'Session terminée' : `Mot ${composeSession.done + 1} sur ${COMPOSE_SESSION_SIZE}`}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    if (composeWord && composeTier && !composeFeedback) {
+                      setExerciseBuckets(prev => ({ ...prev, [composeTier]: [composeWord, ...prev[composeTier]] }));
+                    }
+                    setIsComposeModalOpen(false);
+                    setComposeWord(null);
+                    setComposeTier(null);
+                  }}
+                  className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {composeSessionOver ? (
+                <div className="p-8 flex flex-col items-center gap-6 text-center">
+                  <div className="w-16 h-16 bg-rose-50 text-rose-500 rounded-full flex items-center justify-center">
+                    <CheckCircle2 size={32} />
+                  </div>
+                  <div>
+                    <p className="text-3xl font-black text-slate-900">{Math.round((composeSession.correct / Math.max(1, composeSession.done)) * 100)}%</p>
+                    <p className="text-sm text-slate-500 mt-1">{composeSession.correct} / {composeSession.done} phrases réussies</p>
+                  </div>
+                  <button
+                    onClick={startComposeActivity}
+                    className="w-full py-3.5 bg-rose-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-rose-600 active:scale-[0.98] transition-all shadow-lg shadow-rose-100 flex items-center justify-center gap-2"
+                  >
+                    <Sparkles size={16} />
+                    Nouvelle session
+                  </button>
+                </div>
+              ) : composeWord && (
+              <div className="p-6 sm:p-8 flex flex-col gap-5">
+                <div className="text-center space-y-1">
+                  <p className="text-[10px] font-bold uppercase text-rose-500 tracking-widest">Écrivez une phrase avec :</p>
+                  <div className="flex items-center justify-center gap-2">
+                    <h3 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight break-words">
+                      {getWordWithArticle(composeWord.word, composeWord.gender, composeWord.isPlural)}
+                    </h3>
+                    <button
+                      onClick={() => speak(composeWord.word)}
+                      className="p-1.5 bg-rose-50 text-rose-500 rounded-full hover:bg-rose-100 transition-colors shrink-0"
+                      title="Écouter"
+                    >
+                      <Volume2 size={16} />
+                    </button>
+                  </div>
+                  <p className="text-sm text-slate-400">({composeWord.translation})</p>
+                </div>
+
+                <textarea
+                  value={composeInput}
+                  onChange={(e) => setComposeInput(e.target.value)}
+                  disabled={!!composeFeedback || composeChecking}
+                  placeholder="Votre phrase en français..."
+                  className={`w-full h-24 px-4 py-3 border-2 rounded-2xl outline-none transition-all font-medium resize-none ${
+                    composeFeedback
+                      ? composeFeedback.wordOk
+                        ? 'bg-emerald-50/50 border-emerald-300'
+                        : 'bg-red-50/50 border-red-300'
+                      : 'bg-white border-rose-300 focus:border-rose-500 focus:ring-4 focus:ring-rose-100'
+                  }`}
+                />
+
+                {composeFeedback && (
+                  <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="space-y-3">
+                    <div className={`p-4 rounded-2xl border-2 space-y-2 ${composeFeedback.wordOk ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+                      <p className={`text-xs font-bold uppercase tracking-widest ${composeFeedback.wordOk ? 'text-emerald-600' : 'text-red-500'}`}>
+                        {composeFeedback.wordOk ? '✓ Mot bien utilisé' : '✗ À retravailler'}
+                      </p>
+                      {composeFeedback.corrected && normalizeWord(composeFeedback.corrected) !== normalizeWord(composeInput.trim()) && (
+                        <p className="text-sm font-semibold text-slate-700 italic">"{composeFeedback.corrected}"</p>
+                      )}
+                      {composeFeedback.feedback && (
+                        <p className="text-xs text-slate-600 leading-relaxed">{composeFeedback.feedback}</p>
+                      )}
+                    </div>
+                    <button
+                      onClick={nextComposeWord}
+                      className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
+                    >
+                      Mot suivant
+                    </button>
+                  </motion.div>
+                )}
+
+                {!composeFeedback && (
+                  <button
+                    onClick={checkComposeSentence}
+                    disabled={composeChecking || composeInput.trim().length < 3}
+                    className={`w-full py-3.5 rounded-2xl font-bold text-sm uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 ${
+                      composeChecking
+                        ? 'bg-rose-300 text-white cursor-wait'
+                        : composeInput.trim().length >= 3
+                          ? 'bg-rose-500 text-white hover:bg-rose-600 active:scale-[0.98] shadow-rose-100'
+                          : 'bg-slate-100 text-slate-400 shadow-none cursor-not-allowed'
+                    }`}
+                  >
+                    {composeChecking ? (<><Loader2 size={16} className="animate-spin" /> Vérification...</>) : 'Vérifier ma phrase'}
+                  </button>
                 )}
               </div>
               )}
