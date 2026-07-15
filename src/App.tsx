@@ -604,14 +604,17 @@ Règles importantes :
   const [composeSession, setComposeSession] = useState({ done: 0, correct: 0 });
   const [composeSessionOver, setComposeSessionOver] = useState(false);
 
-  // Combo session: chains Rappel actif (15) → Relier les mots (15) → Quiz (15) → Phrases à compléter (5) = 50 words
-  type ComboPhase = 'reverse' | 'match' | 'quiz' | 'text';
+  // Combo session: chains all 6 activities —
+  // Rappel actif (15) → Relier les mots (15) → Quiz (15) → Écrivez le mot (15) → Phrases (5) → Composez (5) = 70 words
+  type ComboPhase = 'reverse' | 'match' | 'quiz' | 'typing' | 'text' | 'compose';
   const [comboMode, setComboMode] = useState<ComboPhase | null>(null);
   const [comboResults, setComboResults] = useState<Record<ComboPhase, { correct: number; total: number }>>({
     reverse: { correct: 0, total: 0 },
     match: { correct: 0, total: 0 },
     quiz: { correct: 0, total: 0 },
+    typing: { correct: 0, total: 0 },
     text: { correct: 0, total: 0 },
+    compose: { correct: 0, total: 0 },
   });
   const [isComboSummaryOpen, setIsComboSummaryOpen] = useState(false);
 
@@ -1055,7 +1058,9 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       reverse: { correct: 0, total: 0 },
       match: { correct: 0, total: 0 },
       quiz: { correct: 0, total: 0 },
+      typing: { correct: 0, total: 0 },
       text: { correct: 0, total: 0 },
+      compose: { correct: 0, total: 0 },
     });
     setComboMode('reverse');
     startReversePractice();
@@ -2123,7 +2128,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               <button onClick={startComposeActivity} className="w-11 h-11 bg-white border-2 border-rose-100 text-rose-500 rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Composez une phrase">
                 <Edit2 size={20} />
               </button>
-              <button onClick={startComboSession} className="w-11 h-11 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Session complète : les 4 activités à la suite">
+              <button onClick={startComboSession} className="w-11 h-11 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Session complète : les 6 activités à la suite">
                 <Zap size={20} />
               </button>
             </div>
@@ -2176,7 +2181,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 <button
                   onClick={startComboSession}
                   className="w-11 h-11 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-xl flex items-center justify-center shadow-md hover:scale-105 transition-all active:scale-95"
-                  title="Session complète : les 4 activités à la suite (50 mots)"
+                  title="Session complète : les 6 activités à la suite (70 mots)"
                 >
                   <Zap size={20} />
                 </button>
@@ -3549,8 +3554,8 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                               if (comboMode === 'text') {
                                 setComboResults(prev => ({ ...prev, text: { correct: textCorrect, total: textTotal } }));
                                 setIsTextExerciseModalOpen(false);
-                                setComboMode(null);
-                                setIsComboSummaryOpen(true);
+                                setComboMode('compose');
+                                startComposeActivity();
                               }
                             }
                           }}
@@ -3944,14 +3949,13 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                       onClick={() => {
                         setComboResults(prev => ({ ...prev, quiz: { correct: quizSession.correct, total: quizSession.done } }));
                         setIsQuizModalOpen(false);
-                        setComboMode('text');
-                        openTextExercise();
-                        generateStoryExercise();
+                        setComboMode('typing');
+                        startTypingActivity();
                       }}
-                      className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                      className="w-full py-3.5 bg-amber-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-amber-600 active:scale-[0.98] transition-all shadow-lg shadow-amber-100 flex items-center justify-center gap-2"
                     >
-                      <FileText size={16} />
-                      Continuer : Phrases à compléter
+                      <Keyboard size={16} />
+                      Continuer : Écrivez le mot
                     </button>
                   ) : (
                     <button
@@ -4062,6 +4066,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     setIsTypingModalOpen(false);
                     setTypingWord(null);
                     setTypingTier(null);
+                    cancelCombo();
                   }}
                   className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
                 >
@@ -4078,13 +4083,29 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <p className="text-3xl font-black text-slate-900">{Math.round((typingSession.correct / Math.max(1, typingSession.done)) * 100)}%</p>
                     <p className="text-sm text-slate-500 mt-1">{typingSession.correct} / {typingSession.done} mots écrits correctement</p>
                   </div>
-                  <button
-                    onClick={startTypingActivity}
-                    className="w-full py-3.5 bg-amber-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-amber-600 active:scale-[0.98] transition-all shadow-lg shadow-amber-100 flex items-center justify-center gap-2"
-                  >
-                    <Sparkles size={16} />
-                    Nouvelle session
-                  </button>
+                  {comboMode === 'typing' ? (
+                    <button
+                      onClick={() => {
+                        setComboResults(prev => ({ ...prev, typing: { correct: typingSession.correct, total: typingSession.done } }));
+                        setIsTypingModalOpen(false);
+                        setComboMode('text');
+                        openTextExercise();
+                        generateStoryExercise();
+                      }}
+                      className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                    >
+                      <FileText size={16} />
+                      Continuer : Phrases à compléter
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startTypingActivity}
+                      className="w-full py-3.5 bg-amber-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-amber-600 active:scale-[0.98] transition-all shadow-lg shadow-amber-100 flex items-center justify-center gap-2"
+                    >
+                      <Sparkles size={16} />
+                      Nouvelle session
+                    </button>
+                  )}
                 </div>
               ) : typingWord && (
               <div className="p-8 flex flex-col items-center gap-5 text-center">
@@ -4195,6 +4216,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     setIsComposeModalOpen(false);
                     setComposeWord(null);
                     setComposeTier(null);
+                    cancelCombo();
                   }}
                   className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
                 >
@@ -4211,13 +4233,28 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <p className="text-3xl font-black text-slate-900">{Math.round((composeSession.correct / Math.max(1, composeSession.done)) * 100)}%</p>
                     <p className="text-sm text-slate-500 mt-1">{composeSession.correct} / {composeSession.done} phrases réussies</p>
                   </div>
-                  <button
-                    onClick={startComposeActivity}
-                    className="w-full py-3.5 bg-rose-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-rose-600 active:scale-[0.98] transition-all shadow-lg shadow-rose-100 flex items-center justify-center gap-2"
-                  >
-                    <Sparkles size={16} />
-                    Nouvelle session
-                  </button>
+                  {comboMode === 'compose' ? (
+                    <button
+                      onClick={() => {
+                        setComboResults(prev => ({ ...prev, compose: { correct: composeSession.correct, total: composeSession.done } }));
+                        setIsComposeModalOpen(false);
+                        setComboMode(null);
+                        setIsComboSummaryOpen(true);
+                      }}
+                      className="w-full py-3.5 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                    >
+                      <Zap size={16} />
+                      Voir le bilan
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startComposeActivity}
+                      className="w-full py-3.5 bg-rose-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-rose-600 active:scale-[0.98] transition-all shadow-lg shadow-rose-100 flex items-center justify-center gap-2"
+                    >
+                      <Sparkles size={16} />
+                      Nouvelle session
+                    </button>
+                  )}
                 </div>
               ) : composeWord && (
               <div className="p-6 sm:p-8 flex flex-col gap-5">
@@ -4297,11 +4334,13 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
         {/* Combo Session Summary Modal */}
         {isComboSummaryOpen && (() => {
-          const phases: { key: ComboPhase; label: string; icon: React.ReactElement; color: string }[] = [
-            { key: 'reverse', label: 'Rappel actif', icon: <Languages size={16} />, color: 'purple' },
-            { key: 'match', label: 'Relier les mots', icon: <Grid2X2 size={16} />, color: 'indigo' },
-            { key: 'quiz', label: 'Quiz', icon: <CheckCircle2 size={16} />, color: 'emerald' },
-            { key: 'text', label: 'Phrases à compléter', icon: <FileText size={16} />, color: 'indigo' },
+          const phases: { key: ComboPhase; label: string; icon: React.ReactElement; chip: string }[] = [
+            { key: 'reverse', label: 'Rappel actif', icon: <Languages size={16} />, chip: 'bg-purple-100 text-purple-600' },
+            { key: 'match', label: 'Relier les mots', icon: <Grid2X2 size={16} />, chip: 'bg-indigo-100 text-indigo-600' },
+            { key: 'quiz', label: 'Quiz', icon: <CheckCircle2 size={16} />, chip: 'bg-emerald-100 text-emerald-600' },
+            { key: 'typing', label: 'Écrivez le mot', icon: <Keyboard size={16} />, chip: 'bg-amber-100 text-amber-600' },
+            { key: 'text', label: 'Phrases à compléter', icon: <FileText size={16} />, chip: 'bg-indigo-100 text-indigo-600' },
+            { key: 'compose', label: 'Composez une phrase', icon: <Edit2 size={16} />, chip: 'bg-rose-100 text-rose-600' },
           ];
           const totalCorrect = phases.reduce((s, p) => s + comboResults[p.key].correct, 0);
           const totalDone = phases.reduce((s, p) => s + comboResults[p.key].total, 0);
@@ -4343,7 +4382,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                       const pct = r.total > 0 ? Math.round((r.correct / r.total) * 100) : 0;
                       return (
                         <div key={p.key} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
-                          <div className={`p-1.5 rounded-lg bg-${p.color}-100 text-${p.color}-600`}>{p.icon}</div>
+                          <div className={`p-1.5 rounded-lg ${p.chip}`}>{p.icon}</div>
                           <span className="flex-1 text-left text-sm font-bold text-slate-700">{p.label}</span>
                           <span className="text-xs font-bold text-slate-500">{r.correct}/{r.total}</span>
                           <span className="text-xs font-black text-slate-900 w-10 text-right">{pct}%</span>
