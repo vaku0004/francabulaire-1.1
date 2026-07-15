@@ -112,6 +112,9 @@ export default function App() {
   // Which tier each in-flight word was pulled from, keyed by word id
   const currentExerciseBatchTiers = React.useRef<Record<string, ExTier>>({});
   const matchPoolTiers = React.useRef<Record<string, ExTier>>({});
+  // Words already shown in the CURRENT single-word session — a wrong answer requeues the word
+  // in its bucket, but it must not reappear within the same session
+  const sessionSeenIds = React.useRef<Set<string>>(new Set());
 
   const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
@@ -194,7 +197,7 @@ export default function App() {
       }
 
       // Pull 5 words locally; only commit the removal once generation succeeds
-      const { picked, rest } = pullFromBuckets(buckets, 5);
+      const { picked, rest } = pullFromBuckets(buckets, 5, { order: HARD_ORDER });
       if (picked.length < 5) {
         alert("Il vous faut au moins 5 mots révisés en mode cartes pour générer un exercice. Révisez d'abord quelques mots !");
         setIsStoryLoading(false);
@@ -575,6 +578,7 @@ Règles importantes :
   const [reverseRevealed, setReverseRevealed] = useState(false);
   const [reverseSession, setReverseSession] = useState({ done: 0, correct: 0 });
   const [reverseSessionOver, setReverseSessionOver] = useState(false);
+  const [reverseLimit, setReverseLimit] = useState(EXERCISE_SESSION_SIZE);
 
   // Quiz (word + 4 choices) state
   const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
@@ -593,6 +597,7 @@ Règles importantes :
   const [typingResult, setTypingResult] = useState<'correct' | 'wrong' | null>(null);
   const [typingSession, setTypingSession] = useState({ done: 0, correct: 0 });
   const [typingSessionOver, setTypingSessionOver] = useState(false);
+  const [typingLimit, setTypingLimit] = useState(EXERCISE_SESSION_SIZE);
 
   // Compose activity: write your own sentence with the word, AI checks it
   const [isComposeModalOpen, setIsComposeModalOpen] = useState(false);
@@ -605,7 +610,7 @@ Règles importantes :
   const [composeSessionOver, setComposeSessionOver] = useState(false);
 
   // Combo session: chains all 6 activities —
-  // Rappel actif (15) → Relier les mots (15) → Quiz (15) → Écrivez le mot (15) → Phrases (5) → Composez (5) = 70 words
+  // Rappel actif (10) → Relier les mots (15) → Quiz (15) → Écrivez le mot (5) → Phrases (5) → Composez (5) = 55 words
   type ComboPhase = 'reverse' | 'match' | 'quiz' | 'typing' | 'text' | 'compose';
   const [comboMode, setComboMode] = useState<ComboPhase | null>(null);
   const [comboResults, setComboResults] = useState<Record<ComboPhase, { correct: number; total: number }>>({
@@ -678,38 +683,58 @@ Règles importantes :
     return buckets;
   };
 
-  // Pure pull: forgotten → almost → remembered, in that order.
-  // If buckets run out mid-pull, rebuilds a fresh cycle from all eligible words
-  // (this is the ONLY way a word can repeat: the whole pool was exhausted).
-  const pullFromBuckets = (buckets: ExBuckets, n: number): { picked: Array<{ word: Word; tier: ExTier }>; rest: ExBuckets } => {
-    let b = buckets;
+  // Tier orders by activity difficulty:
+  // easy activities (reverse, match, quiz) drill weak words first;
+  // hard/production activities (typing, phrases, compose) challenge well-known words first.
+  const EASY_ORDER: ExTier[] = ['forgotten', 'almost', 'remembered'];
+  const HARD_ORDER: ExTier[] = ['remembered', 'almost', 'forgotten'];
+
+  // Pure pull following the given tier order, skipping excluded (already seen this session) words.
+  // If buckets run out mid-pull, rebuilds a fresh cycle from all eligible words.
+  const pullFromBuckets = (
+    buckets: ExBuckets,
+    n: number,
+    opts?: { order?: ExTier[]; exclude?: Set<string> }
+  ): { picked: Array<{ word: Word; tier: ExTier }>; rest: ExBuckets } => {
+    const order = opts?.order ?? EASY_ORDER;
+    const exclude = opts?.exclude;
+    const rest: ExBuckets = { forgotten: [...buckets.forgotten], almost: [...buckets.almost], remembered: [...buckets.remembered] };
     const picked: Array<{ word: Word; tier: ExTier }> = [];
-    const order: ExTier[] = ['forgotten', 'almost', 'remembered'];
-    const takeFrom = (key: ExTier) => {
-      while (picked.length < n && b[key].length > 0) {
-        picked.push({ word: b[key][0], tier: key });
-        b = { ...b, [key]: b[key].slice(1) };
+    const takePass = () => {
+      for (const key of order) {
+        while (picked.length < n) {
+          const idx = exclude ? rest[key].findIndex(w => !exclude.has(w.id)) : (rest[key].length > 0 ? 0 : -1);
+          if (idx === -1) break;
+          picked.push({ word: rest[key][idx], tier: key });
+          rest[key].splice(idx, 1);
+        }
+        if (picked.length >= n) break;
       }
     };
-    order.forEach(takeFrom);
+    takePass();
     if (picked.length < n) {
-      const remaining = b.forgotten.length + b.almost.length + b.remembered.length;
+      const remaining = rest.forgotten.length + rest.almost.length + rest.remembered.length;
       if (remaining === 0) {
+        // Whole cycle exhausted: reseed from all eligible words (except ones already in hand)
         const eligible = buildExerciseEligible();
         const pickedIds = new Set(picked.map(p => p.word.id));
-        const fresh = eligible.filter(w => !pickedIds.has(w.id));
+        const fresh = eligible.filter(w => !pickedIds.has(w.id) && !exclude?.has(w.id));
         if (fresh.length > 0) {
-          b = partitionIntoBuckets(fresh);
-          order.forEach(takeFrom);
+          const seeded = partitionIntoBuckets(fresh);
+          rest.forgotten = seeded.forgotten;
+          rest.almost = seeded.almost;
+          rest.remembered = seeded.remembered;
+          takePass();
         }
       }
     }
-    return { picked, rest: b };
+    return { picked, rest };
   };
 
-  const pullWords = (n: number): Array<{ word: Word; tier: ExTier }> => {
+  const pullWords = (n: number, order?: ExTier[]): Array<{ word: Word; tier: ExTier }> => {
     const buckets = getOrBuildBuckets();
-    const { picked, rest } = pullFromBuckets(buckets, n);
+    const { picked, rest } = pullFromBuckets(buckets, n, { order, exclude: sessionSeenIds.current });
+    picked.forEach(p => sessionSeenIds.current.add(p.word.id));
     setExerciseBuckets(rest);
     return picked;
   };
@@ -791,9 +816,12 @@ Règles importantes :
   // Sessions are capped at EXERCISE_SESSION_SIZE words; each new session pulls
   // the NEXT words from the shared buckets (already-seen words never repeat within a cycle).
 
-  const startReversePractice = () => {
+  const startReversePractice = (limit?: unknown) => {
+    const sessionSize = typeof limit === 'number' ? limit : EXERCISE_SESSION_SIZE;
+    sessionSeenIds.current = new Set();
     const [pulled] = pullWords(1);
     if (!pulled) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
+    setReverseLimit(sessionSize);
     setReverseWord(pulled.word);
     setReverseTier(pulled.tier);
     setReverseRevealed(false);
@@ -805,7 +833,7 @@ Règles importantes :
   const nextReverseWord = (wasCorrect: boolean) => {
     const next = { done: reverseSession.done + 1, correct: reverseSession.correct + (wasCorrect ? 1 : 0) };
     setReverseSession(next);
-    if (next.done >= EXERCISE_SESSION_SIZE) {
+    if (next.done >= reverseLimit) {
       setReverseSessionOver(true);
       setReverseWord(null);
       setReverseTier(null);
@@ -911,6 +939,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
   };
 
   const startQuizGame = () => {
+    sessionSeenIds.current = new Set();
     const [pulled] = pullWords(1);
     if (!pulled) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
     setQuizSession({ done: 0, correct: 0 });
@@ -936,9 +965,12 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
 
   // ===== Typing activity: translation shown, type the French word (production practice) =====
 
-  const startTypingActivity = () => {
-    const [pulled] = pullWords(1);
+  const startTypingActivity = (limit?: unknown) => {
+    const sessionSize = typeof limit === 'number' ? limit : EXERCISE_SESSION_SIZE;
+    sessionSeenIds.current = new Set();
+    const [pulled] = pullWords(1, HARD_ORDER);
     if (!pulled) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
+    setTypingLimit(sessionSize);
     setTypingWord(pulled.word);
     setTypingTier(pulled.tier);
     setTypingInput('');
@@ -962,13 +994,13 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
   const nextTypingWord = (wasCorrect: boolean) => {
     const next = { done: typingSession.done + 1, correct: typingSession.correct + (wasCorrect ? 1 : 0) };
     setTypingSession(next);
-    if (next.done >= EXERCISE_SESSION_SIZE) {
+    if (next.done >= typingLimit) {
       setTypingSessionOver(true);
       setTypingWord(null);
       setTypingTier(null);
       return;
     }
-    const [pulled] = pullWords(1);
+    const [pulled] = pullWords(1, HARD_ORDER);
     if (!pulled) { setTypingSessionOver(true); setTypingWord(null); setTypingTier(null); return; }
     setTypingWord(pulled.word);
     setTypingTier(pulled.tier);
@@ -979,7 +1011,8 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
   // ===== Compose activity: write your own sentence with the word, AI verifies usage =====
 
   const startComposeActivity = () => {
-    const [pulled] = pullWords(1);
+    sessionSeenIds.current = new Set();
+    const [pulled] = pullWords(1, HARD_ORDER);
     if (!pulled) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
     setComposeWord(pulled.word);
     setComposeTier(pulled.tier);
@@ -1037,7 +1070,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       setComposeTier(null);
       return;
     }
-    const [pulled] = pullWords(1);
+    const [pulled] = pullWords(1, HARD_ORDER);
     if (!pulled) { setComposeSessionOver(true); setComposeWord(null); setComposeTier(null); return; }
     setComposeWord(pulled.word);
     setComposeTier(pulled.tier);
@@ -1063,7 +1096,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       compose: { correct: 0, total: 0 },
     });
     setComboMode('reverse');
-    startReversePractice();
+    startReversePractice(10);
   };
 
   // Called when the user bails out of the combo sequence via any modal's close button
@@ -2181,7 +2214,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                 <button
                   onClick={startComboSession}
                   className="w-11 h-11 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-xl flex items-center justify-center shadow-md hover:scale-105 transition-all active:scale-95"
-                  title="Session complète : les 6 activités à la suite (70 mots)"
+                  title="Session complète : les 6 activités à la suite (55 mots)"
                 >
                   <Zap size={20} />
                 </button>
@@ -3789,7 +3822,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   <div>
                     <h3 className="text-xl font-bold text-slate-900">Rappel actif</h3>
                     <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-                      {reverseSessionOver ? 'Session terminée' : `${currentLangObj.flag} → 🇫🇷 · Mot ${reverseSession.done + 1} sur ${EXERCISE_SESSION_SIZE}`}
+                      {reverseSessionOver ? 'Session terminée' : `${currentLangObj.flag} → 🇫🇷 · Mot ${reverseSession.done + 1} sur ${reverseLimit}`}
                     </p>
                   </div>
                 </div>
@@ -3950,7 +3983,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                         setComboResults(prev => ({ ...prev, quiz: { correct: quizSession.correct, total: quizSession.done } }));
                         setIsQuizModalOpen(false);
                         setComboMode('typing');
-                        startTypingActivity();
+                        startTypingActivity(5);
                       }}
                       className="w-full py-3.5 bg-amber-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-amber-600 active:scale-[0.98] transition-all shadow-lg shadow-amber-100 flex items-center justify-center gap-2"
                     >
@@ -4054,7 +4087,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   <div>
                     <h3 className="text-xl font-bold text-slate-900">Écrivez le mot</h3>
                     <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-                      {typingSessionOver ? 'Session terminée' : `Mot ${typingSession.done + 1} sur ${EXERCISE_SESSION_SIZE}`}
+                      {typingSessionOver ? 'Session terminée' : `Mot ${typingSession.done + 1} sur ${typingLimit}`}
                     </p>
                   </div>
                 </div>
