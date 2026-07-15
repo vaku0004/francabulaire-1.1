@@ -34,7 +34,8 @@ import {
   Trash2,
   Keyboard,
   Edit2,
-  BarChart3
+  BarChart3,
+  Zap
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Word, ReviewGrade } from './types';
@@ -579,6 +580,17 @@ Règles importantes :
   const [quizSession, setQuizSession] = useState({ done: 0, correct: 0 });
   const [quizSessionOver, setQuizSessionOver] = useState(false);
 
+  // Combo session: chains Rappel actif (15) → Relier les mots (15) → Quiz (15) → Phrases à compléter (5) = 50 words
+  type ComboPhase = 'reverse' | 'match' | 'quiz' | 'text';
+  const [comboMode, setComboMode] = useState<ComboPhase | null>(null);
+  const [comboResults, setComboResults] = useState<Record<ComboPhase, { correct: number; total: number }>>({
+    reverse: { correct: 0, total: 0 },
+    match: { correct: 0, total: 0 },
+    quiz: { correct: 0, total: 0 },
+    text: { correct: 0, total: 0 },
+  });
+  const [isComboSummaryOpen, setIsComboSummaryOpen] = useState(false);
+
   // Exercise words are eligible once reviewed at least once in flashcards, for the current language
   const buildExerciseEligible = useCallback(() => {
     return words.filter(w => {
@@ -894,6 +906,28 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
     if (!pulled) { setQuizSessionOver(true); setQuizWord(null); setQuizTier(null); return; }
     prepareQuizQuestion(pulled.word, pulled.tier);
   };
+
+  // ===== Combo session: runs all 4 activities back-to-back on the same 50-word batch =====
+
+  const startComboSession = () => {
+    const buckets = getOrBuildBuckets();
+    const total = buckets.forgotten.length + buckets.almost.length + buckets.remembered.length;
+    if (total < 5) {
+      alert("Révisez d'abord quelques mots en mode cartes !");
+      return;
+    }
+    setComboResults({
+      reverse: { correct: 0, total: 0 },
+      match: { correct: 0, total: 0 },
+      quiz: { correct: 0, total: 0 },
+      text: { correct: 0, total: 0 },
+    });
+    setComboMode('reverse');
+    startReversePractice();
+  };
+
+  // Called when the user bails out of the combo sequence via any modal's close button
+  const cancelCombo = () => setComboMode(null);
 
 
   useEffect(() => {
@@ -1949,6 +1983,9 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               <button onClick={startQuizGame} className="w-11 h-11 bg-white border-2 border-emerald-100 text-emerald-500 rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Quiz">
                 <CheckCircle2 size={20} />
               </button>
+              <button onClick={startComboSession} className="w-11 h-11 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-xl flex items-center justify-center shadow-sm active:scale-95 transition-all" title="Session complète : les 4 activités à la suite">
+                <Zap size={20} />
+              </button>
             </div>
 
             <div className="relative flex-1 flex">
@@ -1981,6 +2018,13 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                   title="Quiz : choisissez la bonne traduction"
                 >
                   <CheckCircle2 size={20} />
+                </button>
+                <button
+                  onClick={startComboSession}
+                  className="w-11 h-11 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-xl flex items-center justify-center shadow-md hover:scale-105 transition-all active:scale-95"
+                  title="Session complète : les 4 activités à la suite (50 mots)"
+                >
+                  <Zap size={20} />
                 </button>
               </div>
 
@@ -3122,8 +3166,8 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     </p>
                   </div>
                 </div>
-                <button 
-                  onClick={() => setIsTextExerciseModalOpen(false)}
+                <button
+                  onClick={() => { setIsTextExerciseModalOpen(false); cancelCombo(); }}
                   className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
                 >
                   <X size={20} />
@@ -3341,10 +3385,19 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                                 const tier = currentExerciseBatchTiers.current[w.id] || 'almost';
                                 resolveExerciseAnswer(w, tier, !batchWrongWordIds.current.has(w.id));
                               });
+                              const textTotal = currentExerciseBatch.length;
+                              const textCorrect = textTotal - batchWrongWordIds.current.size;
                               batchWrongWordIds.current.clear();
                               setCurrentExerciseBatch([]);
                               currentExerciseBatchTiers.current = {};
                               recordExerciseActivity(generatedStory.gaps.length);
+
+                              if (comboMode === 'text') {
+                                setComboResults(prev => ({ ...prev, text: { correct: textCorrect, total: textTotal } }));
+                                setIsTextExerciseModalOpen(false);
+                                setComboMode(null);
+                                setIsComboSummaryOpen(true);
+                              }
                             }
                           }}
                           className="flex-1 py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100"
@@ -3407,6 +3460,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     matchWrongWordIds.current.clear();
                     setMatchPool([]);
                     setIsMatchModalOpen(false);
+                    cancelCombo();
                   }}
                   className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
                 >
@@ -3530,13 +3584,29 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                       {Math.round(((matchPool.length - matchWrongWordIds.current.size) / matchPool.length) * 100)}%
                       <span className="text-xs font-bold text-slate-400 uppercase tracking-widest ml-2">du premier coup</span>
                     </p>
-                    <button
-                      onClick={startMatchGame}
-                      className="px-8 py-4 bg-emerald-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-emerald-600 transition-all shadow-lg shadow-emerald-100 flex items-center gap-2 mx-auto"
-                    >
-                      <RotateCcw size={18} />
-                      Rejouer
-                    </button>
+                    {comboMode === 'match' ? (
+                      <button
+                        onClick={() => {
+                          setComboResults(prev => ({ ...prev, match: { correct: matchPool.length - matchWrongWordIds.current.size, total: matchPool.length } }));
+                          setMatchPool([]);
+                          setIsMatchModalOpen(false);
+                          setComboMode('quiz');
+                          startQuizGame();
+                        }}
+                        className="px-8 py-4 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 flex items-center gap-2 mx-auto"
+                      >
+                        <CheckCircle2 size={18} />
+                        Continuer : Quiz
+                      </button>
+                    ) : (
+                      <button
+                        onClick={startMatchGame}
+                        className="px-8 py-4 bg-emerald-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-emerald-600 transition-all shadow-lg shadow-emerald-100 flex items-center gap-2 mx-auto"
+                      >
+                        <RotateCcw size={18} />
+                        Rejouer
+                      </button>
+                    )}
                   </motion.div>
                 )}
               </div>
@@ -3572,6 +3642,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     setIsReverseModalOpen(false);
                     setReverseWord(null);
                     setReverseTier(null);
+                    cancelCombo();
                   }}
                   className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
                 >
@@ -3588,13 +3659,28 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <p className="text-3xl font-black text-slate-900">{Math.round((reverseSession.correct / Math.max(1, reverseSession.done)) * 100)}%</p>
                     <p className="text-sm text-slate-500 mt-1">{reverseSession.correct} / {reverseSession.done} mots retrouvés</p>
                   </div>
-                  <button
-                    onClick={startReversePractice}
-                    className="w-full py-3.5 bg-purple-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-purple-700 active:scale-[0.98] transition-all shadow-lg shadow-purple-100 flex items-center justify-center gap-2"
-                  >
-                    <Sparkles size={16} />
-                    Nouvelle session
-                  </button>
+                  {comboMode === 'reverse' ? (
+                    <button
+                      onClick={() => {
+                        setComboResults(prev => ({ ...prev, reverse: { correct: reverseSession.correct, total: reverseSession.done } }));
+                        setIsReverseModalOpen(false);
+                        setComboMode('match');
+                        startMatchGame();
+                      }}
+                      className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                    >
+                      <Grid2X2 size={16} />
+                      Continuer : Relier les mots
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startReversePractice}
+                      className="w-full py-3.5 bg-purple-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-purple-700 active:scale-[0.98] transition-all shadow-lg shadow-purple-100 flex items-center justify-center gap-2"
+                    >
+                      <Sparkles size={16} />
+                      Nouvelle session
+                    </button>
+                  )}
                 </div>
               ) : reverseWord && (
               <div className="p-8 flex flex-col items-center gap-6 text-center">
@@ -3682,6 +3768,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     setIsQuizModalOpen(false);
                     setQuizWord(null);
                     setQuizTier(null);
+                    cancelCombo();
                   }}
                   className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
                 >
@@ -3698,13 +3785,29 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     <p className="text-3xl font-black text-slate-900">{Math.round((quizSession.correct / Math.max(1, quizSession.done)) * 100)}%</p>
                     <p className="text-sm text-slate-500 mt-1">{quizSession.correct} / {quizSession.done} bonnes réponses</p>
                   </div>
-                  <button
-                    onClick={startQuizGame}
-                    className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
-                  >
-                    <Sparkles size={16} />
-                    Nouvelle session
-                  </button>
+                  {comboMode === 'quiz' ? (
+                    <button
+                      onClick={() => {
+                        setComboResults(prev => ({ ...prev, quiz: { correct: quizSession.correct, total: quizSession.done } }));
+                        setIsQuizModalOpen(false);
+                        setComboMode('text');
+                        openTextExercise();
+                        generateStoryExercise();
+                      }}
+                      className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                    >
+                      <FileText size={16} />
+                      Continuer : Phrases à compléter
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startQuizGame}
+                      className="w-full py-3.5 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                    >
+                      <Sparkles size={16} />
+                      Nouvelle session
+                    </button>
+                  )}
                 </div>
               ) : quizWord && (
               <div className="p-8 flex flex-col items-center gap-6">
@@ -3776,6 +3879,77 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
             </motion.div>
           </div>
         )}
+
+        {/* Combo Session Summary Modal */}
+        {isComboSummaryOpen && (() => {
+          const phases: { key: ComboPhase; label: string; icon: React.ReactElement; color: string }[] = [
+            { key: 'reverse', label: 'Rappel actif', icon: <Languages size={16} />, color: 'purple' },
+            { key: 'match', label: 'Relier les mots', icon: <Grid2X2 size={16} />, color: 'indigo' },
+            { key: 'quiz', label: 'Quiz', icon: <CheckCircle2 size={16} />, color: 'emerald' },
+            { key: 'text', label: 'Phrases à compléter', icon: <FileText size={16} />, color: 'indigo' },
+          ];
+          const totalCorrect = phases.reduce((s, p) => s + comboResults[p.key].correct, 0);
+          const totalDone = phases.reduce((s, p) => s + comboResults[p.key].total, 0);
+          const overallPct = Math.round((totalCorrect / Math.max(1, totalDone)) * 100);
+          return (
+            <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[200] flex items-center justify-center p-4 sm:p-6">
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                className="bg-white rounded-3xl shadow-2xl w-full max-w-md flex flex-col overflow-hidden"
+              >
+                <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-xl">
+                      <Zap size={24} />
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-bold text-slate-900">Session complète</h3>
+                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{totalDone} mots au total</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setIsComboSummaryOpen(false)}
+                    className="p-2 hover:bg-slate-100 rounded-full text-slate-400 transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+
+                <div className="p-8 flex flex-col items-center gap-6 text-center">
+                  <div>
+                    <p className="text-4xl font-black text-slate-900">{overallPct}%</p>
+                    <p className="text-sm text-slate-500 mt-1">{totalCorrect} / {totalDone} bonnes réponses au total</p>
+                  </div>
+
+                  <div className="w-full space-y-2">
+                    {phases.map(p => {
+                      const r = comboResults[p.key];
+                      const pct = r.total > 0 ? Math.round((r.correct / r.total) * 100) : 0;
+                      return (
+                        <div key={p.key} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl">
+                          <div className={`p-1.5 rounded-lg bg-${p.color}-100 text-${p.color}-600`}>{p.icon}</div>
+                          <span className="flex-1 text-left text-sm font-bold text-slate-700">{p.label}</span>
+                          <span className="text-xs font-bold text-slate-500">{r.correct}/{r.total}</span>
+                          <span className="text-xs font-black text-slate-900 w-10 text-right">{pct}%</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <button
+                    onClick={() => { setIsComboSummaryOpen(false); startComboSession(); }}
+                    className="w-full py-3.5 bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-2xl font-bold text-sm uppercase tracking-widest active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                  >
+                    <Zap size={16} />
+                    Nouvelle session complète
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
+
         {/* Statistics Modal */}
         {isStatsModalOpen && (() => {
           const days: { key: string; label: string; cards: number; exercises: number }[] = [];
