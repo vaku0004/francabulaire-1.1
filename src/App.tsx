@@ -2273,11 +2273,11 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                       lastFetchedQuery.current = '';
                     }}
                     onKeyDown={(e) => e.key === 'Enter' && triggerSearch()}
-                    className="w-full pl-12 pr-24 py-4 bg-white border-2 border-indigo-300 rounded-2xl shadow-md shadow-indigo-100/60 focus:ring-4 focus:ring-indigo-200/60 focus:border-indigo-500 outline-none transition-all font-semibold text-base placeholder:text-slate-400 placeholder:font-normal"
+                    className="w-full pl-12 pr-24 py-4 bg-white border-2 border-indigo-500 rounded-2xl shadow-lg shadow-indigo-300/50 focus:ring-4 focus:ring-indigo-300/60 focus:border-indigo-600 outline-none transition-all font-semibold text-base placeholder:text-slate-400 placeholder:font-normal"
                   />
                   <button
                     onClick={triggerSearch}
-                    className="absolute left-4 top-1/2 -translate-y-1/2 text-indigo-400 hover:text-indigo-600 transition-colors"
+                    className="absolute left-4 top-1/2 -translate-y-1/2 text-indigo-500 hover:text-indigo-700 transition-colors"
                     title="Rechercher"
                   >
                     <Search size={20} />
@@ -2308,6 +2308,11 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     )}
                   </div>
                 </div>
+
+                <p className="text-xs text-indigo-400/80 font-medium text-center flex items-center justify-center gap-1.5">
+                  <Sparkles size={13} />
+                  Découvrez la traduction — mot ou phrase, français ou {currentLangObj.name.toLowerCase()}
+                </p>
               </div>
 
               <AnimatePresence mode="wait">
@@ -2498,40 +2503,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                     const fresh = Math.max(0, langWords.length - forgotten - almost - remembered);
                     const total = Math.max(1, langWords.length);
                     return (
-                      <motion.div key="stats" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-5 pt-1">
-                        <p className="text-xs text-slate-400 font-medium text-center">
-                          Entrez un mot français ou {currentLangObj.name.toLowerCase()} — il sera traduit et ajouté à votre base.
-                        </p>
-
-                        <div className="grid grid-cols-3 gap-2.5">
-                          <div className="p-3 bg-white/80 border border-indigo-100 rounded-2xl text-center shadow-sm">
-                            <p className="text-2xl font-black text-slate-900">{langWords.length}</p>
-                            <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">Mots</p>
-                          </div>
-                          <div className="p-3 bg-white/80 border border-emerald-100 rounded-2xl text-center shadow-sm">
-                            <p className="text-2xl font-black text-emerald-600">{masteredCount}</p>
-                            <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">Appris</p>
-                          </div>
-                          <div className="p-3 bg-white/80 border border-orange-100 rounded-2xl text-center shadow-sm">
-                            <p className="text-2xl font-black text-orange-500">🔥{streak}</p>
-                            <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400 mt-0.5">Jours</p>
-                          </div>
-                        </div>
-
-                        <div className="p-4 bg-white/80 border border-indigo-100 rounded-2xl shadow-sm space-y-2">
-                          <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest">
-                            <span className="text-slate-400">Aujourd'hui</span>
-                            <span className="text-indigo-600">{dailyStats.reviewedToday} / {dailyStats.totalToday} cartes</span>
-                          </div>
-                          <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
-                            <motion.div
-                              initial={false}
-                              animate={{ width: `${dailyStats.progress}%` }}
-                              className="h-full bg-indigo-500 rounded-full"
-                            />
-                          </div>
-                        </div>
-
+                      <motion.div key="stats" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="pt-1">
                         <div className="p-4 bg-white/80 border border-indigo-100 rounded-2xl shadow-sm space-y-3">
                           <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">État de la mémoire</p>
                           <div className="h-2.5 w-full rounded-full overflow-hidden flex">
