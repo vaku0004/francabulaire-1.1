@@ -743,13 +743,17 @@ Règles importantes :
   };
 
   // Resolve one word's answer in any activity:
-  // - correct → promotes one tier (forgotten→almost→remembered); remembered+correct is simply done for this cycle
-  // - wrong → forgotten/almost repeat within their own tier; remembered demotes to almost
+  // - correct → promotes one tier (forgotten→almost→remembered); remembered+correct is done for this cycle,
+  //   so a word answered right simply stops coming back
+  // - wrong → forgotten/almost repeat within their own tier (the reinforcement loop:
+  //   keep failing it and it keeps coming back); remembered demotes to almost
   //
-  // Scheduling: a wrong answer always pulls the word back (review tomorrow, one level down).
-  // A correct answer advances the SRS ladder ONLY in production activities (`objective: true` —
-  // typing the word, composing a sentence), where the answer is verified and cannot be faked.
-  // Recognition activities (quiz, matching) stay label-only: a 1-in-4 guess must not earn progress.
+  // Scheduling: activities are the ONLY objective signal, so this is where the card ladder is corrected.
+  // A wrong answer brakes the word (review tomorrow, one level down, mastered → learning) — without this
+  // nothing could stop a poorly-known word from marching to mastered on the fixed ladder.
+  // A correct answer advances the ladder only in production activities (`objective: true` — typing the
+  // word, composing a sentence); recognition (quiz, matching) stays label-only, since a 1-in-4 guess
+  // must not earn progress.
   const resolveExerciseAnswer = (word: Word, tier: ExTier, wasCorrect: boolean, objective = false) => {
     setExerciseBuckets(prev => {
       if (wasCorrect) {
@@ -1709,38 +1713,25 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
     }
   }, [reviewQueue, isReviewing, reviewPaused, targetLanguage, sessionQueue.length]);
 
-  // Shared SRS ladder — used by flashcard grading AND by successes in production activities
-  // (typing / composing), where the answer is objectively verified and cannot be faked.
+  // The SRS ladder advances one fixed step per review — 1d → 3d → 7d → 14d → 30d → mastered
+  // (maintenance 60/120/240/365d). Self-assessment does NOT set the interval: it is unreliable,
+  // so its only job is `last_grade`, which routes the word into an activity tier
+  // (forgotten → almost → remembered). The brake lives in the activities: an objectively wrong
+  // answer there knocks the word back down the ladder (see resolveExerciseAnswer).
   const applyGrade = (w: Word, grade: ReviewGrade): Word => {
     const DAY = 1000 * 60 * 60 * 24;
     let nextReview = Date.now();
-    let status = w.status;
+    let status: Word['status'] = 'learning';
     let reviewCount = w.review_count;
 
-    if (grade === 'remembered') {
-      // Strict day ladder: success #1 -> 1d, #2 -> 3d, #3 -> 7d, #4 -> 14d, #5 -> 30d,
-      // then mastered with maintenance reviews (60d -> 120d -> 240d -> capped at 365d).
-      // Existing words keep their review_count as-is — nothing is reset by this scheme.
-      if (reviewCount < REVIEW_INTERVALS.length) {
-        nextReview += DAY * REVIEW_INTERVALS[reviewCount];
-        status = 'learning';
-      } else {
-        const maintenanceDays = Math.min(365, 30 * Math.pow(2, reviewCount - (REVIEW_INTERVALS.length - 1)));
-        nextReview += DAY * maintenanceDays;
-        status = 'mastered';
-      }
-      reviewCount += 1;
-    } else if (grade === 'almost') {
-      // Step back one level and review tomorrow
-      nextReview += DAY;
-      status = 'learning';
-      reviewCount = Math.max(0, reviewCount - 1);
+    if (reviewCount < REVIEW_INTERVALS.length) {
+      nextReview += DAY * REVIEW_INTERVALS[reviewCount];
     } else {
-      // Forgotten: soft reset — step back 2 levels (not to zero), retry in 1 hour
-      nextReview += 1000 * 60 * 60 * 1;
-      status = 'learning';
-      reviewCount = Math.max(0, reviewCount - 2);
+      const maintenanceDays = Math.min(365, 30 * Math.pow(2, reviewCount - (REVIEW_INTERVALS.length - 1)));
+      nextReview += DAY * maintenanceDays;
+      status = 'mastered';
     }
+    reviewCount += 1;
 
     if (status === 'mastered' && w.status !== 'mastered') {
       setJustMastered(w.word);
@@ -1752,7 +1743,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
       next_review_at: nextReview,
       status,
       review_count: reviewCount,
-      last_grade: grade,
+      last_grade: grade, // drives activity tier only
       last_reviewed_at: Date.now(),
       first_reviewed_at: w.first_reviewed_at ?? Date.now(),
     };
