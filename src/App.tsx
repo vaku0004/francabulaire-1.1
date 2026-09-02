@@ -497,6 +497,7 @@ Règles importantes :
     return s;
   }, [activityLog, exerciseLog]);
   const [isStatsModalOpen, setIsStatsModalOpen] = useState(false);
+  const [forecastRange, setForecastRange] = useState<30 | 90 | 180 | 365>(30);
   const [currentReviewIndex, setCurrentReviewIndex] = useState(0);
   const [showTranslation, setShowTranslation] = useState(false);
   // Commit-before-reveal: the learner declares "I know / I don't know" BEFORE seeing the answer,
@@ -1577,7 +1578,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       seen: !!w.last_reviewed_at,
     }));
 
-    const HORIZON = 60;
+    const HORIZON = 365;
     const forecast: { ts: number; load: number; backlog: number }[] = [];
     let allSeenDayIdx: number | null = null;
     let clearDayIdx: number | null = null;
@@ -1620,7 +1621,8 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       clearDayIdx,
       horizon: HORIZON,
     };
-  }, [words, targetLanguage, clockTick]);
+    // Keyed on the calendar day, not on clockTick: a full-year simulation must not re-run every minute
+  }, [words, targetLanguage, dayKey(new Date())]);
 
   const startReview = () => {
     setSessionQueue([...reviewQueue]);
@@ -4844,7 +4846,6 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
           const totalEx = days.reduce((s, d) => s + d.exercises, 0);
           const ps = progressStats;
           const fmtDate = (ts: number) => new Date(ts).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
-          const maxLoad = Math.max(1, ...ps.forecast.map(f => f.load));
           const maxStage = Math.max(1, ...ps.stages.map(s => s.count));
           const seenPct = ps.total > 0 ? Math.round((ps.seenCount / ps.total) * 100) : 0;
 
@@ -4920,39 +4921,95 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                     </p>
                   </div>
 
-                  {/* Forecast: how much work is coming, and when everything will have been seen */}
-                  <div className="space-y-3">
-                    <div className="flex items-baseline justify-between gap-3">
-                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Charge prévue (30 jours)</p>
-                      <span className="text-[10px] font-bold text-indigo-500">max {maxLoad}/jour</span>
-                    </div>
-                    <div className="flex items-end justify-between gap-[2px] h-28">
-                      {ps.forecast.slice(0, 30).map((f, i) => (
-                        <div key={f.ts} className="flex-1 h-full flex flex-col justify-end group relative">
-                          <div className="absolute -top-8 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-800 text-white text-[9px] font-bold px-2 py-1 rounded-lg whitespace-nowrap z-10">
-                            {fmtDate(f.ts)} · {f.load} cartes{f.backlog > 0 ? ` · ${f.backlog} en retard` : ''}
-                          </div>
-                          <div
-                            className={`w-full rounded-t-sm min-h-[2px] ${f.backlog > 0 ? 'bg-red-400' : 'bg-indigo-400'}`}
-                            style={{ height: `${(f.load / maxLoad) * 100}%`, opacity: f.load ? 1 : 0.15 }}
-                          />
-                          {i % 7 === 0 && (
-                            <span className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[7px] font-bold text-slate-400 whitespace-nowrap">
-                              {fmtDate(f.ts)}
+                  {/* Forecast: how much work is coming, over the chosen horizon */}
+                  {(() => {
+                    const ranges: { days: 30 | 90 | 180 | 365; label: string }[] = [
+                      { days: 30, label: '1 mois' },
+                      { days: 90, label: '3 mois' },
+                      { days: 180, label: '6 mois' },
+                      { days: 365, label: '1 an' },
+                    ];
+                    // Longer horizons are grouped so the chart stays readable
+                    const bucketDays = forecastRange <= 30 ? 1 : forecastRange <= 90 ? 7 : forecastRange <= 180 ? 14 : 30;
+                    const slice = ps.forecast.slice(0, forecastRange);
+                    const buckets: { ts: number; load: number; saturated: boolean; days: number }[] = [];
+                    for (let i = 0; i < slice.length; i += bucketDays) {
+                      const chunk = slice.slice(i, i + bucketDays);
+                      buckets.push({
+                        ts: chunk[0].ts,
+                        load: chunk.reduce((s, f) => s + f.load, 0),
+                        saturated: chunk.some(f => f.backlog > 0),
+                        days: chunk.length,
+                      });
+                    }
+                    const maxBucket = Math.max(1, ...buckets.map(b => b.load));
+                    const periodTotal = buckets.reduce((s, b) => s + b.load, 0);
+                    const unitLabel = bucketDays === 1 ? 'jour' : bucketDays === 30 ? 'mois' : `${bucketDays} j`;
+                    const labelEvery = Math.max(1, Math.ceil(buckets.length / 6));
+                    const fmtBucket = (ts: number) => bucketDays >= 30
+                      ? new Date(ts).toLocaleDateString('fr-FR', { month: 'short', year: '2-digit' })
+                      : fmtDate(ts);
+
+                    return (
+                      <div className="space-y-3">
+                        <div className="flex items-baseline justify-between gap-3 flex-wrap">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Charge prévue</p>
+                          <span className="text-[10px] font-bold text-indigo-500">
+                            {periodTotal} cartes au total · max {maxBucket}/{unitLabel}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-1.5">
+                          {ranges.map(r => (
+                            <button
+                              key={r.days}
+                              onClick={() => setForecastRange(r.days)}
+                              className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all ${
+                                forecastRange === r.days
+                                  ? 'bg-indigo-600 text-white shadow-sm'
+                                  : 'bg-slate-50 text-slate-400 hover:bg-slate-100'
+                              }`}
+                            >
+                              {r.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="flex items-end justify-between gap-[2px] h-28 pb-4">
+                          {buckets.map((b, i) => (
+                            <div key={b.ts} className="flex-1 h-full flex flex-col justify-end group relative">
+                              <div className="absolute -top-8 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-800 text-white text-[9px] font-bold px-2 py-1 rounded-lg whitespace-nowrap z-10">
+                                {fmtBucket(b.ts)}{bucketDays > 1 ? ` (${b.days} j)` : ''} · {b.load} cartes{b.saturated ? ' · saturé' : ''}
+                              </div>
+                              <div
+                                className={`w-full rounded-t-sm min-h-[2px] ${b.saturated ? 'bg-red-400' : 'bg-indigo-400'}`}
+                                style={{ height: `${(b.load / maxBucket) * 100}%`, opacity: b.load ? 1 : 0.15 }}
+                              />
+                              {i % labelEvery === 0 && (
+                                <span className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[7px] font-bold text-slate-400 whitespace-nowrap">
+                                  {fmtBucket(b.ts)}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="flex items-center gap-4 flex-wrap">
+                          <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">
+                            <span className="w-2.5 h-2.5 bg-indigo-400 rounded-sm inline-block" /> Dans la limite
+                          </span>
+                          <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">
+                            <span className="w-2.5 h-2.5 bg-red-400 rounded-sm inline-block" /> Limite atteinte
+                          </span>
+                          {bucketDays > 1 && (
+                            <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
+                              1 barre = {bucketDays} jours
                             </span>
                           )}
                         </div>
-                      ))}
-                    </div>
-                    <div className="flex items-center gap-4 pt-3">
-                      <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">
-                        <span className="w-2.5 h-2.5 bg-indigo-400 rounded-sm inline-block" /> Dans la limite
-                      </span>
-                      <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">
-                        <span className="w-2.5 h-2.5 bg-red-400 rounded-sm inline-block" /> Jour saturé
-                      </span>
-                    </div>
-                  </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Plain-language timeline answer */}
                   <div className="p-4 bg-indigo-50/60 border border-indigo-100 rounded-2xl space-y-2">
