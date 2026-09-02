@@ -490,6 +490,9 @@ Règles importantes :
   const [isStatsModalOpen, setIsStatsModalOpen] = useState(false);
   const [currentReviewIndex, setCurrentReviewIndex] = useState(0);
   const [showTranslation, setShowTranslation] = useState(false);
+  // Commit-before-reveal: the learner declares "I know / I don't know" BEFORE seeing the answer,
+  // then verifies against it. Grading after the reveal alone invites the illusion of knowing.
+  const [cardCommit, setCardCommit] = useState<'known' | 'unknown' | null>(null);
   const [justMastered, setJustMastered] = useState<string | null>(null);
   
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
@@ -742,9 +745,12 @@ Règles importantes :
   // Resolve one word's answer in any activity:
   // - correct → promotes one tier (forgotten→almost→remembered); remembered+correct is simply done for this cycle
   // - wrong → forgotten/almost repeat within their own tier; remembered demotes to almost
-  // Only wrong answers touch the flashcard schedule (pull next_review_at to tomorrow, step back one level);
-  // correct answers only update the tier label so future cycles seed from the latest progress.
-  const resolveExerciseAnswer = (word: Word, tier: ExTier, wasCorrect: boolean) => {
+  //
+  // Scheduling: a wrong answer always pulls the word back (review tomorrow, one level down).
+  // A correct answer advances the SRS ladder ONLY in production activities (`objective: true` —
+  // typing the word, composing a sentence), where the answer is verified and cannot be faked.
+  // Recognition activities (quiz, matching) stay label-only: a 1-in-4 guess must not earn progress.
+  const resolveExerciseAnswer = (word: Word, tier: ExTier, wasCorrect: boolean, objective = false) => {
     setExerciseBuckets(prev => {
       if (wasCorrect) {
         if (tier === 'forgotten') return { ...prev, almost: [...prev.almost, word] };
@@ -755,6 +761,12 @@ Règles importantes :
       return { ...prev, [tier]: [...prev[tier], word] };
     });
 
+    // Objectively verified success = real retrieval → advance the ladder like a flashcard "Retenu"
+    if (wasCorrect && objective) {
+      setWords(prev => prev.map(w => (w.id === word.id ? applyGrade(w, 'remembered') : w)));
+      return;
+    }
+
     const newGrade: ReviewGrade | null = wasCorrect
       ? (tier === 'forgotten' ? 'almost' : tier === 'almost' ? 'remembered' : null)
       : (tier === 'remembered' ? 'almost' : tier);
@@ -763,7 +775,7 @@ Règles importantes :
     setWords(prev => prev.map(w => {
       if (w.id !== word.id) return w;
       if (wasCorrect) {
-        return { ...w, last_grade: newGrade }; // label only — exercises don't accelerate SRS scheduling
+        return { ...w, last_grade: newGrade }; // label only — recognition doesn't accelerate scheduling
       }
       const DAY = 1000 * 60 * 60 * 24;
       return {
@@ -985,7 +997,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
     const norm = (s: string) => normalizeWord(stripArticles(s));
     const ok = norm(typingInput) === norm(typingWord.word);
     setTypingResult(ok ? 'correct' : 'wrong');
-    if (typingTier) resolveExerciseAnswer(typingWord, typingTier, ok);
+    if (typingTier) resolveExerciseAnswer(typingWord, typingTier, ok, true); // typed = objectively verified
     recordExerciseActivity();
     speak(typingWord.word);
     if (ok) setTimeout(() => nextTypingWord(true), 1200);
@@ -1050,7 +1062,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
         corrected: result.corrected || composeInput.trim(),
         feedback: result.feedback || '',
       });
-      if (composeTier) resolveExerciseAnswer(composeWord, composeTier, result.wordOk);
+      if (composeTier) resolveExerciseAnswer(composeWord, composeTier, result.wordOk, true); // AI-verified production
       recordExerciseActivity();
     } catch (e) {
       console.error('Compose check error:', e);
@@ -1484,6 +1496,8 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
   const startReview = () => {
     setSessionQueue([...reviewQueue]);
     setCurrentReviewIndex(0);
+    setShowTranslation(false);
+    setCardCommit(null);
     setIsReviewing(true);
   };
 
@@ -1491,6 +1505,8 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     setIsReviewing(false);
     setSessionQueue([]);
     setCurrentReviewIndex(0);
+    setShowTranslation(false);
+    setCardCommit(null);
     setReviewPaused(pausedByUser);
   };
 
@@ -1693,55 +1709,63 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
     }
   }, [reviewQueue, isReviewing, reviewPaused, targetLanguage, sessionQueue.length]);
 
+  // Shared SRS ladder — used by flashcard grading AND by successes in production activities
+  // (typing / composing), where the answer is objectively verified and cannot be faked.
+  const applyGrade = (w: Word, grade: ReviewGrade): Word => {
+    const DAY = 1000 * 60 * 60 * 24;
+    let nextReview = Date.now();
+    let status = w.status;
+    let reviewCount = w.review_count;
+
+    if (grade === 'remembered') {
+      // Strict day ladder: success #1 -> 1d, #2 -> 3d, #3 -> 7d, #4 -> 14d, #5 -> 30d,
+      // then mastered with maintenance reviews (60d -> 120d -> 240d -> capped at 365d).
+      // Existing words keep their review_count as-is — nothing is reset by this scheme.
+      if (reviewCount < REVIEW_INTERVALS.length) {
+        nextReview += DAY * REVIEW_INTERVALS[reviewCount];
+        status = 'learning';
+      } else {
+        const maintenanceDays = Math.min(365, 30 * Math.pow(2, reviewCount - (REVIEW_INTERVALS.length - 1)));
+        nextReview += DAY * maintenanceDays;
+        status = 'mastered';
+      }
+      reviewCount += 1;
+    } else if (grade === 'almost') {
+      // Step back one level and review tomorrow
+      nextReview += DAY;
+      status = 'learning';
+      reviewCount = Math.max(0, reviewCount - 1);
+    } else {
+      // Forgotten: soft reset — step back 2 levels (not to zero), retry in 1 hour
+      nextReview += 1000 * 60 * 60 * 1;
+      status = 'learning';
+      reviewCount = Math.max(0, reviewCount - 2);
+    }
+
+    if (status === 'mastered' && w.status !== 'mastered') {
+      setJustMastered(w.word);
+      setTimeout(() => setJustMastered(null), 3000);
+    }
+
+    return {
+      ...w,
+      next_review_at: nextReview,
+      status,
+      review_count: reviewCount,
+      last_grade: grade,
+      last_reviewed_at: Date.now(),
+      first_reviewed_at: w.first_reviewed_at ?? Date.now(),
+    };
+  };
+
   const handleReview = (grade: ReviewGrade) => {
     if (!currentWord || !isReviewing) return;
 
-    const updatedWords = words.map(w => {
-      if (w.id === currentWord.id) {
-        let nextReview = Date.now();
-        let status = w.status;
-        let reviewCount = w.review_count;
-
-        const DAY = 1000 * 60 * 60 * 24;
-
-        if (grade === 'remembered') {
-          // Strict day ladder: success #1 -> 1d, #2 -> 3d, #3 -> 7d, #4 -> 14d, #5 -> 30d,
-          // then mastered with maintenance reviews (60d -> 120d -> 240d -> capped at 365d).
-          // Existing words keep their review_count as-is — nothing is reset by this scheme.
-          if (reviewCount < REVIEW_INTERVALS.length) {
-            nextReview += DAY * REVIEW_INTERVALS[reviewCount];
-            status = 'learning';
-          } else {
-            const maintenanceDays = Math.min(365, 30 * Math.pow(2, reviewCount - (REVIEW_INTERVALS.length - 1)));
-            nextReview += DAY * maintenanceDays;
-            status = 'mastered';
-          }
-          reviewCount += 1;
-        } else if (grade === 'almost') {
-          // Step back one level and review tomorrow
-          nextReview += DAY;
-          status = 'learning';
-          reviewCount = Math.max(0, reviewCount - 1);
-        } else {
-          // Forgotten: soft reset — step back 2 levels (not to zero), retry in 1 hour
-          nextReview += 1000 * 60 * 60 * 1;
-          status = 'learning';
-          reviewCount = Math.max(0, reviewCount - 2);
-        }
-
-        const isNowMastered = status === 'mastered' && w.status !== 'mastered';
-        if (isNowMastered) {
-          setJustMastered(w.word);
-          setTimeout(() => setJustMastered(null), 3000);
-        }
-
-        return { ...w, next_review_at: nextReview, status, review_count: reviewCount, last_grade: grade, last_reviewed_at: Date.now(), first_reviewed_at: w.first_reviewed_at ?? Date.now() };
-      }
-      return w;
-    });
+    const updatedWords = words.map(w => (w.id === currentWord.id ? applyGrade(w, grade) : w));
 
     setWords(updatedWords);
     setShowTranslation(false);
+    setCardCommit(null);
     recordActivity();
 
     if (currentReviewIndex + 1 < sessionQueue.length) {
@@ -2364,11 +2388,10 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
                     <div className="w-full max-w-sm space-y-6">
                       <div
-                        onClick={() => setShowTranslation(true)}
-                        className={`p-6 border-2 border-dashed rounded-2xl text-center cursor-pointer transition-all ${
+                        className={`p-6 border-2 border-dashed rounded-2xl text-center transition-all ${
                           showTranslation
                             ? 'border-indigo-200 bg-indigo-50/30'
-                            : 'border-slate-200 hover:border-indigo-300 bg-slate-50/50'
+                            : 'border-slate-200 bg-slate-50/50'
                         }`}
                       >
                         {showTranslation ? (
@@ -2401,39 +2424,87 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                           </motion.div>
                         ) : (
                           <p className="text-slate-400 font-medium">
-                            {(currentWord?.review_count ?? 0) >= 2 ? 'Cliquez pour voir le mot français' : 'Cliquez pour voir la traduction'}
+                            Rappelez-vous la réponse, puis répondez ci-dessous
                           </p>
                         )}
                       </div>
 
-                      {showTranslation && (
-                        <motion.div 
+                      {/* Step 1 — commit BEFORE seeing the answer */}
+                      {!showTranslation && (
+                        <motion.div
                           initial={{ opacity: 0, y: 10 }}
                           animate={{ opacity: 1, y: 0 }}
-                          className="grid grid-cols-3 gap-3"
+                          className="space-y-3"
                         >
-                          <button 
-                            onClick={() => handleReview('forgotten')}
-                            className="flex flex-col items-center gap-2 p-3 rounded-xl border border-red-100 hover:bg-red-50 transition-colors group"
-                          >
-                            <XCircle className="text-red-400 group-hover:text-red-500" size={24} />
-                            <span className="text-[10px] font-bold uppercase text-red-500">Oublié</span>
-                          </button>
-                          <button 
-                            onClick={() => handleReview('almost')}
-                            className="flex flex-col items-center gap-2 p-3 rounded-xl border border-amber-100 hover:bg-amber-50 transition-colors group"
-                          >
-                            <AlertCircle className="text-amber-400 group-hover:text-amber-500" size={24} />
-                            <span className="text-[10px] font-bold uppercase text-amber-600">Presque</span>
-                          </button>
-                          <button 
-                            onClick={() => handleReview('remembered')}
-                            className="flex flex-col items-center gap-2 p-3 rounded-xl border border-emerald-100 hover:bg-emerald-50 transition-colors group"
-                          >
-                            <CheckCircle2 className="text-emerald-400 group-hover:text-emerald-500" size={24} />
-                            <span className="text-[10px] font-bold uppercase text-emerald-600">Retenu</span>
-                          </button>
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 text-center">
+                            {(currentWord?.review_count ?? 0) >= 2 ? 'Connaissez-vous le mot français ?' : 'Connaissez-vous la traduction ?'}
+                          </p>
+                          <div className="grid grid-cols-2 gap-3">
+                            <button
+                              onClick={() => { setCardCommit('unknown'); setShowTranslation(true); }}
+                              className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-red-100 hover:bg-red-50 hover:border-red-300 transition-colors group"
+                            >
+                              <XCircle className="text-red-400 group-hover:text-red-500" size={26} />
+                              <span className="text-[10px] font-bold uppercase text-red-500">Je ne sais pas</span>
+                            </button>
+                            <button
+                              onClick={() => { setCardCommit('known'); setShowTranslation(true); }}
+                              className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-emerald-100 hover:bg-emerald-50 hover:border-emerald-300 transition-colors group"
+                            >
+                              <CheckCircle2 className="text-emerald-400 group-hover:text-emerald-500" size={26} />
+                              <span className="text-[10px] font-bold uppercase text-emerald-600">Je sais</span>
+                            </button>
+                          </div>
                         </motion.div>
+                      )}
+
+                      {/* Step 2 — verify the commitment against the revealed answer */}
+                      {showTranslation && cardCommit === 'known' && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="space-y-3"
+                        >
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 text-center">
+                            Votre réponse était-elle juste ?
+                          </p>
+                          <div className="grid grid-cols-3 gap-3">
+                            <button
+                              onClick={() => handleReview('forgotten')}
+                              className="flex flex-col items-center gap-2 p-3 rounded-xl border border-red-100 hover:bg-red-50 transition-colors group"
+                            >
+                              <XCircle className="text-red-400 group-hover:text-red-500" size={24} />
+                              <span className="text-[10px] font-bold uppercase text-red-500">Non</span>
+                            </button>
+                            <button
+                              onClick={() => handleReview('almost')}
+                              className="flex flex-col items-center gap-2 p-3 rounded-xl border border-amber-100 hover:bg-amber-50 transition-colors group"
+                            >
+                              <AlertCircle className="text-amber-400 group-hover:text-amber-500" size={24} />
+                              <span className="text-[10px] font-bold uppercase text-amber-600">Presque</span>
+                            </button>
+                            <button
+                              onClick={() => handleReview('remembered')}
+                              className="flex flex-col items-center gap-2 p-3 rounded-xl border border-emerald-100 hover:bg-emerald-50 transition-colors group"
+                            >
+                              <CheckCircle2 className="text-emerald-400 group-hover:text-emerald-500" size={24} />
+                              <span className="text-[10px] font-bold uppercase text-emerald-600">Oui, exact</span>
+                            </button>
+                          </div>
+                        </motion.div>
+                      )}
+
+                      {/* Committed "I don't know" — no self-grading needed, it's already an honest miss */}
+                      {showTranslation && cardCommit === 'unknown' && (
+                        <motion.button
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          onClick={() => handleReview('forgotten')}
+                          className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 active:scale-[0.98] transition-all shadow-lg shadow-indigo-100 flex items-center justify-center gap-2"
+                        >
+                          <ChevronRight size={18} />
+                          Mot suivant
+                        </motion.button>
                       )}
                     </div>
                     
@@ -3322,6 +3393,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                           setSessionQueue(next);
                           setCurrentReviewIndex(ci => Math.min(idx < ci ? ci - 1 : ci, next.length - 1));
                           setShowTranslation(false);
+                          setCardCommit(null);
                         }
                       }
                     }
