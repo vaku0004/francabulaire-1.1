@@ -1688,11 +1688,13 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     setCollocations([]);
     setCollocationsFor('');
 
+    // A slow/overloaded service must NOT be reported as "word not found" — that sends the
+    // learner hunting for a dictionary problem that doesn't exist.
     let timedOut = false;
     const timeoutId = setTimeout(() => {
       timedOut = true;
       setIsSearching(false);
-      setError(`Le mot "${trimmedQuery}" n'a pas été trouvé.`);
+      setError(`Le service de traduction est surchargé. Réessayez — le mot "${trimmedQuery}" n'est probablement pas en cause.`);
     }, 30000);
 
     try {
@@ -1738,7 +1740,12 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
       });
       const result = JSON.parse(extractJson(response) || '{}');
 
-      if (timedOut) return; // error already shown, don't silently add the word
+      // A late but valid answer is better than a stale timeout message — accept it and clear the error
+      if (timedOut && result.found && result.frenchWord && result.translation) {
+        setError(null);
+      } else if (timedOut) {
+        return; // late AND unusable — keep the timeout message
+      }
 
       if (result.found && result.frenchWord && result.translation) {
         const finalWord = result.frenchWord;
@@ -1801,13 +1808,25 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
         if (result.suggestions && result.suggestions.length > 0) {
           setSuggestions(result.suggestions);
         }
-      } else if (!result.found && result.suggestions) {
+      } else if (result.found === false && Array.isArray(result.suggestions) && result.suggestions.length > 0) {
         setSuggestions(result.suggestions);
         setError(`Le mot "${trimmedQuery}" n'a pas été trouvé. Vouliez-vous dire :`);
+      } else {
+        // Answer came back but unusable (missing fields, or found:false with no suggestions).
+        // Say so instead of leaving the screen silently stuck.
+        lastFetchedQuery.current = ''; // allow an immediate retry of the same word
+        setError(`Réponse incomplète du service pour "${trimmedQuery}". Réessayez.`);
       }
     } catch (err: any) {
       console.error("Translation error:", err);
-      setError(`Erreur: ${err.message || 'Erreur inconnue'}`);
+      const raw = String(err?.message || '');
+      const code = (() => { try { return JSON.parse(raw)?.error?.code; } catch { return null; } })();
+      lastFetchedQuery.current = ''; // a failed call must not block retrying the same word
+      setError(
+        code === 429 ? "Quota de traduction épuisé pour aujourd'hui. Réessayez plus tard."
+        : code === 503 || code === 500 ? "Le service de traduction est momentanément surchargé. Réessayez."
+        : `Erreur: ${err.message || 'Erreur inconnue'}`
+      );
     } finally {
       clearTimeout(timeoutId);
       setIsSearching(false);
