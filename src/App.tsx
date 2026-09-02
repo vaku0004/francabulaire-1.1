@@ -439,6 +439,48 @@ Règles importantes :
     return gender === 'm' ? `le ${trimmed}` : `la ${trimmed}`;
   };
 
+  // Where a word stands on the interval ladder, in words the learner can act on.
+  // review_count N means the word was last scheduled with REVIEW_INTERVALS[N-1] — that's the
+  // interval it is currently living on (1 → 3 → 7 → 14 → 30 days → "Appris").
+  const wordStage = (w: Word) => {
+    if (!w.last_reviewed_at) {
+      return { label: 'Jamais vu', cls: 'bg-slate-100 text-slate-500', title: "Ce mot n'a encore jamais été montré" };
+    }
+    if (w.status === 'mastered') {
+      return { label: 'Appris', cls: 'bg-emerald-100 text-emerald-700', title: 'Toute l\'échelle parcourue — révisions d\'entretien espacées' };
+    }
+    const c = w.review_count ?? 0;
+    if (c === 0) {
+      return { label: 'Redémarré', cls: 'bg-red-100 text-red-600', title: 'Oublié — le mot est reparti au début de l\'échelle' };
+    }
+    const idx = Math.min(c, REVIEW_INTERVALS.length) - 1;
+    const days = REVIEW_INTERVALS[idx];
+    const palette = [
+      'bg-red-100 text-red-600',
+      'bg-orange-100 text-orange-600',
+      'bg-amber-100 text-amber-700',
+      'bg-lime-100 text-lime-700',
+      'bg-emerald-100 text-emerald-600',
+    ];
+    return {
+      label: `Palier ${days} j`,
+      cls: palette[idx],
+      title: `Révisé ${c} fois — intervalle actuel : ${days} jours`,
+    };
+  };
+
+  // "revoir dans 3 j" / "en retard de 2 j" / "aujourd'hui"
+  const nextReviewLabel = (w: Word) => {
+    const DAY = 1000 * 60 * 60 * 24;
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const diff = Math.round((w.next_review_at - startOfToday.getTime()) / DAY);
+    if (diff < 0) return { text: `en retard de ${Math.abs(diff)} j`, cls: 'text-red-500' };
+    if (diff === 0) return { text: "à revoir aujourd'hui", cls: 'text-indigo-500' };
+    if (diff === 1) return { text: 'à revoir demain', cls: 'text-slate-400' };
+    return { text: `à revoir dans ${diff} j`, cls: 'text-slate-400' };
+  };
+
   const cleanExample = (example?: string) => {
     if (!example) return '';
     return example.split(' (')[0].trim();
@@ -3580,12 +3622,17 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                                 {w.gender === 'm' ? 'm' : 'f'}
                               </span>
                             )}
-                            <span className={`text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0 ${
-                              w.status === 'mastered' ? 'bg-emerald-50 text-emerald-600' : 
-                              w.status === 'learning' ? 'bg-amber-50 text-amber-600' : 'bg-slate-50 text-slate-400'
-                            }`}>
-                              {w.status === 'mastered' ? 'Appris' : w.status === 'learning' ? 'En cours' : 'Nouveau'}
-                            </span>
+                            {(() => {
+                              const st = wordStage(w);
+                              return (
+                                <span
+                                  title={st.title}
+                                  className={`text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0 ${st.cls}`}
+                                >
+                                  {st.label}
+                                </span>
+                              );
+                            })()}
                           </div>
                         </div>
                         <p className="text-xs text-indigo-600 font-medium truncate mt-0.5">
@@ -3596,6 +3643,19 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                             </span>
                           )}
                         </p>
+                        {(() => {
+                          const nr = nextReviewLabel(w);
+                          return (
+                            <p className="text-[10px] font-medium mt-0.5 flex items-center gap-1.5 flex-wrap">
+                              <span className={nr.cls}>
+                                {w.last_reviewed_at ? nr.text : 'jamais montré'}
+                              </span>
+                              {(w.review_count ?? 0) > 0 && (
+                                <span className="text-slate-300">· {w.review_count} révisions</span>
+                              )}
+                            </p>
+                          );
+                        })()}
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
                         <button 
