@@ -1529,6 +1529,99 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
   }).length, [words, targetLanguage]);
   const isDayComplete = reviewQueue.length === 0 && words.length > 0;
 
+  // Where every word sits on the interval ladder, and a day-by-day forecast of the workload ahead.
+  // Both are derived from the words themselves (review_count / next_review_at), so they are accurate
+  // from day one and automatically reflect skipped days — a missed day just grows the backlog.
+  const progressStats = useMemo(() => {
+    const DAY = 1000 * 60 * 60 * 24;
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const t0 = todayStart.getTime();
+
+    const langWords = words.filter(w => targetLanguage === 'Russe'
+      ? (!w.target_lang || w.target_lang === 'Russe')
+      : w.target_lang === targetLanguage);
+
+    // Ladder stage = the interval the word is currently waiting out.
+    // review_count N means it was last scheduled with REVIEW_INTERVALS[N-1].
+    const stageOf = (w: Word): number => {
+      if (!w.last_reviewed_at) return -1;                    // never seen
+      const c = w.review_count ?? 0;
+      if (c === 0) return 0;                                  // reset by errors → back to 1 day
+      if (c >= REVIEW_INTERVALS.length + 1) return REVIEW_INTERVALS.length; // mastered / maintenance
+      return c - 1;                                           // 0→1j, 1→3j, 2→7j, 3→14j, 4→30j
+    };
+
+    const stages = [
+      { label: 'Nouveau', days: null as number | null, color: 'bg-slate-300', count: 0 },
+      ...REVIEW_INTERVALS.map(d => ({ label: `${d} j`, days: d, color: '', count: 0 })),
+      { label: 'Appris', days: null as number | null, color: 'bg-emerald-500', count: 0 },
+    ];
+    const ladderColors = ['bg-red-400', 'bg-orange-400', 'bg-amber-400', 'bg-lime-400', 'bg-emerald-400'];
+    REVIEW_INTERVALS.forEach((_, i) => { stages[i + 1].color = ladderColors[i]; });
+
+    langWords.forEach(w => {
+      const s = stageOf(w);
+      stages[s + 1].count += 1;
+    });
+
+    const seenCount = langWords.filter(w => !!w.last_reviewed_at).length;
+    const unseenCount = langWords.length - seenCount;
+
+    // Forward simulation: replay the real daily rules (50/day, 15 new/day, most-overdue first),
+    // assuming every review succeeds — the optimistic bound on how long the queue takes to clear.
+    type Sim = { next: number; count: number; seen: boolean };
+    const sim: Sim[] = langWords.map(w => ({
+      next: w.next_review_at,
+      count: w.review_count ?? 0,
+      seen: !!w.last_reviewed_at,
+    }));
+
+    const HORIZON = 60;
+    const forecast: { ts: number; load: number; backlog: number }[] = [];
+    let allSeenDayIdx: number | null = null;
+    let clearDayIdx: number | null = null;
+
+    for (let d = 0; d < HORIZON; d++) {
+      const dayEnd = t0 + (d + 1) * DAY - 1;
+      const due = sim.filter(s => s.next <= dayEnd).sort((a, b) => a.next - b.next);
+      const seenDue = due.filter(s => s.seen);
+      const newDue = due.filter(s => !s.seen);
+
+      let budget = DAILY_REVIEW_LIMIT;
+      const takeSeen = seenDue.slice(0, budget);
+      budget -= takeSeen.length;
+      const takeNew = newDue.slice(0, Math.min(budget, DAILY_NEW_LIMIT));
+
+      [...takeSeen, ...takeNew].forEach(s => {
+        s.seen = true;
+        const interval = s.count < REVIEW_INTERVALS.length
+          ? REVIEW_INTERVALS[s.count]
+          : Math.min(365, 30 * Math.pow(2, s.count - (REVIEW_INTERVALS.length - 1)));
+        s.next = t0 + d * DAY + interval * DAY;
+        s.count += 1;
+      });
+
+      const load = takeSeen.length + takeNew.length;
+      const backlog = due.length - load;
+      forecast.push({ ts: t0 + d * DAY, load, backlog });
+
+      if (allSeenDayIdx === null && sim.every(s => s.seen)) allSeenDayIdx = d;
+      if (clearDayIdx === null && backlog === 0 && allSeenDayIdx !== null) clearDayIdx = d;
+    }
+
+    return {
+      total: langWords.length,
+      seenCount,
+      unseenCount,
+      stages,
+      forecast,
+      allSeenDayIdx,
+      clearDayIdx,
+      horizon: HORIZON,
+    };
+  }, [words, targetLanguage, clockTick]);
+
   const startReview = () => {
     setSessionQueue([...reviewQueue]);
     setCurrentReviewIndex(0);
@@ -4730,21 +4823,29 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
           const maxVal = Math.max(1, ...days.map(d => Math.max(d.cards, d.exercises)));
           const totalCards = days.reduce((s, d) => s + d.cards, 0);
           const totalEx = days.reduce((s, d) => s + d.exercises, 0);
+          const ps = progressStats;
+          const fmtDate = (ts: number) => new Date(ts).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
+          const maxLoad = Math.max(1, ...ps.forecast.map(f => f.load));
+          const maxStage = Math.max(1, ...ps.stages.map(s => s.count));
+          const seenPct = ps.total > 0 ? Math.round((ps.seenCount / ps.total) * 100) : 0;
+
           return (
             <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[200] flex items-center justify-center p-4 sm:p-6">
               <motion.div
                 initial={{ scale: 0.95, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
-                className="bg-white rounded-3xl shadow-2xl w-full max-w-lg flex flex-col overflow-hidden"
+                className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl flex flex-col overflow-hidden max-h-[92vh]"
               >
-                <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <div className="p-6 border-b border-slate-100 flex items-center justify-between shrink-0">
                   <div className="flex items-center gap-3">
                     <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
                       <BarChart3 size={24} />
                     </div>
                     <div>
                       <h3 className="text-xl font-bold text-slate-900">Statistiques</h3>
-                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">14 derniers jours</p>
+                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                        {ps.total} mots · {seenPct}% déjà vus
+                      </p>
                     </div>
                   </div>
                   <button
@@ -4755,24 +4856,123 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                   </button>
                 </div>
 
-                <div className="p-6 space-y-6">
-                  <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="p-6 space-y-7 overflow-y-auto">
+                  <div className="grid grid-cols-4 gap-2.5 text-center">
+                    <div className="p-3 bg-slate-50 rounded-2xl">
+                      <p className="text-xl font-black text-slate-900">{ps.total}</p>
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Mots</p>
+                    </div>
                     <div className="p-3 bg-indigo-50 rounded-2xl">
-                      <p className="text-2xl font-black text-indigo-600">{totalCards}</p>
-                      <p className="text-[9px] font-bold uppercase tracking-widest text-indigo-400">Cartes révisées</p>
+                      <p className="text-xl font-black text-indigo-600">{ps.seenCount}</p>
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-indigo-400">Déjà vus</p>
                     </div>
                     <div className="p-3 bg-emerald-50 rounded-2xl">
-                      <p className="text-2xl font-black text-emerald-600">{totalEx}</p>
-                      <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-400">Exercices réussis</p>
+                      <p className="text-xl font-black text-emerald-600">{masteredCount}</p>
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-emerald-400">Appris</p>
                     </div>
                     <div className="p-3 bg-orange-50 rounded-2xl">
-                      <p className="text-2xl font-black text-orange-500">🔥 {streak}</p>
-                      <p className="text-[9px] font-bold uppercase tracking-widest text-orange-400">Jours d'affilée</p>
+                      <p className="text-xl font-black text-orange-500">🔥{streak}</p>
+                      <p className="text-[9px] font-bold uppercase tracking-widest text-orange-400">Jours</p>
                     </div>
                   </div>
 
-                  <div>
-                    <div className="flex items-end justify-between gap-1 h-36 px-1">
+                  {/* Where every word sits on the interval ladder */}
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Répartition par intervalle</p>
+                    <div className="space-y-1.5">
+                      {ps.stages.map(s => (
+                        <div key={s.label} className="flex items-center gap-3">
+                          <span className="w-16 text-[10px] font-bold uppercase tracking-widest text-slate-500 text-right shrink-0">
+                            {s.label}
+                          </span>
+                          <div className="flex-1 h-5 bg-slate-50 rounded-lg overflow-hidden">
+                            <div
+                              className={`h-full ${s.color} rounded-lg transition-all`}
+                              style={{ width: `${(s.count / maxStage) * 100}%`, minWidth: s.count > 0 ? '4px' : '0' }}
+                            />
+                          </div>
+                          <span className="w-10 text-xs font-black text-slate-700 text-right shrink-0">{s.count}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-400 leading-snug">
+                      Chaque mot monte l'échelle 1 → 3 → 7 → 14 → 30 jours, puis devient « Appris ».
+                      Une erreur dans une activité le fait redescendre d'un cran.
+                    </p>
+                  </div>
+
+                  {/* Forecast: how much work is coming, and when everything will have been seen */}
+                  <div className="space-y-3">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Charge prévue (30 jours)</p>
+                      <span className="text-[10px] font-bold text-indigo-500">max {maxLoad}/jour</span>
+                    </div>
+                    <div className="flex items-end justify-between gap-[2px] h-28">
+                      {ps.forecast.slice(0, 30).map((f, i) => (
+                        <div key={f.ts} className="flex-1 h-full flex flex-col justify-end group relative">
+                          <div className="absolute -top-8 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-800 text-white text-[9px] font-bold px-2 py-1 rounded-lg whitespace-nowrap z-10">
+                            {fmtDate(f.ts)} · {f.load} cartes{f.backlog > 0 ? ` · ${f.backlog} en retard` : ''}
+                          </div>
+                          <div
+                            className={`w-full rounded-t-sm min-h-[2px] ${f.backlog > 0 ? 'bg-red-400' : 'bg-indigo-400'}`}
+                            style={{ height: `${(f.load / maxLoad) * 100}%`, opacity: f.load ? 1 : 0.15 }}
+                          />
+                          {i % 7 === 0 && (
+                            <span className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[7px] font-bold text-slate-400 whitespace-nowrap">
+                              {fmtDate(f.ts)}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-4 pt-3">
+                      <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">
+                        <span className="w-2.5 h-2.5 bg-indigo-400 rounded-sm inline-block" /> Dans la limite
+                      </span>
+                      <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">
+                        <span className="w-2.5 h-2.5 bg-red-400 rounded-sm inline-block" /> Jour saturé
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Plain-language timeline answer */}
+                  <div className="p-4 bg-indigo-50/60 border border-indigo-100 rounded-2xl space-y-2">
+                    {ps.unseenCount > 0 ? (
+                      <p className="text-sm text-slate-700 leading-relaxed">
+                        <span className="font-bold">{ps.unseenCount} mots</span> n'ont jamais été vus.
+                        {ps.allSeenDayIdx !== null
+                          ? <> En révisant chaque jour, vous les aurez tous vus au moins une fois vers le{' '}
+                              <span className="font-bold text-indigo-600">
+                                {fmtDate(ps.forecast[ps.allSeenDayIdx].ts)}
+                              </span>{' '}
+                              (dans {ps.allSeenDayIdx + 1} jours).
+                            </>
+                          : <> Au rythme de {DAILY_NEW_LIMIT} nouveaux mots par jour, il faudra plus de {ps.horizon} jours pour tous les voir.</>}
+                      </p>
+                    ) : (
+                      <p className="text-sm text-slate-700 leading-relaxed">
+                        <span className="font-bold text-emerald-600">Tous vos mots ont déjà été vus au moins une fois.</span>{' '}
+                        Il ne reste que les répétitions programmées.
+                      </p>
+                    )}
+                    {overdueCount > 0 && (
+                      <p className="text-xs text-red-500 font-medium">
+                        ⏰ {overdueCount} révisions en retard — elles passent avant les nouveaux mots.
+                      </p>
+                    )}
+                    <p className="text-[10px] text-slate-400 leading-snug">
+                      Prévision optimiste : elle suppose que chaque révision réussit. Un jour sauté décale la courbe
+                      et fait grossir le retard — rouvrez cet écran pour la voir se recalculer.
+                    </p>
+                  </div>
+
+                  {/* Actual activity history */}
+                  <div className="space-y-3">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Activité réelle (14 jours)</p>
+                      <span className="text-[10px] font-bold text-slate-400">{totalCards} cartes · {totalEx} exercices</span>
+                    </div>
+                    <div className="flex items-end justify-between gap-1 h-32 px-1">
                       {days.map(d => (
                         <div key={d.key} className="flex-1 flex flex-col items-center justify-end gap-0.5 h-full group relative">
                           <div className="absolute -top-7 hidden group-hover:block bg-slate-800 text-white text-[9px] font-bold px-2 py-1 rounded-lg whitespace-nowrap z-10">
@@ -4792,25 +4992,18 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                         </div>
                       ))}
                     </div>
-                    <div className="flex items-center justify-center gap-4 mt-3">
-                      <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
-                        <span className="w-3 h-3 bg-indigo-400 rounded-sm inline-block" /> Cartes
+                    <div className="flex items-center justify-center gap-4">
+                      <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">
+                        <span className="w-2.5 h-2.5 bg-indigo-400 rounded-sm inline-block" /> Cartes
                       </span>
-                      <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
-                        <span className="w-3 h-3 bg-emerald-400 rounded-sm inline-block" /> Exercices
+                      <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">
+                        <span className="w-2.5 h-2.5 bg-emerald-400 rounded-sm inline-block" /> Exercices
                       </span>
                     </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3 text-center pt-2 border-t border-slate-100">
-                    <div>
-                      <p className="text-lg font-black text-slate-900">{words.length}</p>
-                      <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Mots au total</p>
-                    </div>
-                    <div>
-                      <p className="text-lg font-black text-emerald-600">{masteredCount}</p>
-                      <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Mots appris</p>
-                    </div>
+                    <p className="text-[10px] text-slate-400 leading-snug">
+                      L'historique démarre au moment où cette fonction a été ajoutée : les jours antérieurs
+                      apparaissent vides même si vous avez travaillé.
+                    </p>
                   </div>
                 </div>
               </motion.div>
