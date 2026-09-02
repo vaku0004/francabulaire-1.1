@@ -402,6 +402,12 @@ Règles importantes :
   };
   const [error, setError] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  // Collocations for the word currently shown in the dictionary — learning in context.
+  // Clicking one saves the PHRASE to the base instead of the bare word.
+  const [collocations, setCollocations] = useState<{ phrase: string; translation: string }[]>([]);
+  const [collocationsFor, setCollocationsFor] = useState<string>('');
+  const [isLoadingCollocations, setIsLoadingCollocations] = useState(false);
+  const [savedCollocations, setSavedCollocations] = useState<Set<string>>(new Set());
   const pendingTranslations = React.useRef<Set<string>>(new Set());
   const lastFetchedQuery = React.useRef<string>('');
 
@@ -1560,6 +1566,8 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     setIsSearching(true);
     setError(null);
     setSuggestions([]);
+    setCollocations([]);
+    setCollocationsFor('');
 
     let timedOut = false;
     const timeoutId = setTimeout(() => {
@@ -1594,9 +1602,15 @@ Part of speech:
 - Always fill "infinitiveTranslation" too when "infinitive" is set.
 - If "frenchWord" is NOT a verb, leave "infinitive" and "infinitiveTranslation" empty.
 
+Collocations — the most valuable part for the learner:
+- Fill "collocations" with 4 SHORT, genuinely common French expressions built around "frenchWord" (2-5 words each).
+- Prefer what a native actually says: fixed expressions, verb+noun pairs, common prepositions.
+- Each item: {"phrase": "the French collocation", "translation": "its meaning in ${currentLangObj.aiName}"}.
+- Keep "frenchWord" (or its inflected form) inside every phrase. No full sentences, no punctuation at the end.
+
 If the word has a typo or is misspelled (only for French words), set found:false and put 2-3 correct French spelling suggestions in "suggestions".
 If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
-{"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[]}`;
+{"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[],"collocations":[{"phrase":"...","translation":"..."}]}`;
 
       const ai = new GoogleGenAI({ apiKey });
       const response = await generateWithFallback(ai, {
@@ -1610,7 +1624,20 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
       if (result.found && result.frenchWord && result.translation) {
         const finalWord = result.frenchWord;
         const normalizedFinal = normalizeWord(finalWord);
-        
+
+        // Collocations come free with the same call — show them under the result
+        if (Array.isArray(result.collocations)) {
+          const cleaned = result.collocations
+            .filter((c: any) => c && typeof c.phrase === 'string' && c.phrase.trim() && typeof c.translation === 'string')
+            .map((c: any) => ({ phrase: c.phrase.trim(), translation: c.translation.trim() }))
+            .filter((c: any) => normalizeWord(c.phrase) !== normalizedFinal)
+            .slice(0, 6);
+          if (cleaned.length > 0) {
+            setCollocations(cleaned);
+            setCollocationsFor(finalWord);
+          }
+        }
+
         const newWord: Word = {
           id: crypto.randomUUID(),
           word: finalWord,
@@ -1673,6 +1700,79 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
       fetchTranslation(searchQuery);
     }
   }, [searchQuery, searchResult, fetchTranslation]);
+
+  // Load (or extend) the list of collocations for the word currently shown in the dictionary
+  const fetchCollocations = async (word: Word) => {
+    if (isLoadingCollocations) return;
+    setIsLoadingCollocations(true);
+    try {
+      const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
+      if (!apiKey) throw new Error("Clé API introuvable");
+      const ai = new GoogleGenAI({ apiKey });
+      const already = collocationsFor === word.word ? collocations.map(c => c.phrase) : [];
+      const response = await generateWithFallback(ai, {
+        contents: `Donne 4 expressions françaises COURANTES construites autour du mot "${word.word}" (${word.translation}).
+
+Règles :
+- 2 à 5 mots par expression, courtes et vraiment usuelles (ce qu'un natif dit réellement).
+- Le mot "${word.word}" (ou sa forme fléchie/conjuguée) doit figurer dans chaque expression.
+- Pas de phrase complète, pas de ponctuation finale.
+${already.length > 0 ? `- N'utilise AUCUNE de ces expressions déjà proposées : ${already.join(' ; ')}` : ''}
+
+Réponds UNIQUEMENT avec un JSON brut, sans markdown :
+{"collocations":[{"phrase":"...","translation":"sens en ${currentLangObj.aiName}"}]}`,
+        config: {}
+      });
+      const result = JSON.parse(extractJson(response) || '{}');
+      if (!Array.isArray(result.collocations)) throw new Error('bad response');
+      const seen = new Set([normalizeWord(word.word), ...already.map(p => normalizeWord(p))]);
+      const fresh = result.collocations
+        .filter((c: any) => c && typeof c.phrase === 'string' && c.phrase.trim() && typeof c.translation === 'string')
+        .map((c: any) => ({ phrase: c.phrase.trim(), translation: c.translation.trim() }))
+        .filter((c: { phrase: string }) => {
+          const k = normalizeWord(c.phrase);
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+      setCollocations(prev => (collocationsFor === word.word ? [...prev, ...fresh] : fresh));
+      setCollocationsFor(word.word);
+    } catch (e) {
+      console.error('Collocations error:', e);
+      alert("Impossible de charger les expressions. Réessayez.");
+    } finally {
+      setIsLoadingCollocations(false);
+    }
+  };
+
+  // Save a collocation as its own entry — this is the "learn in context" path:
+  // the phrase enters the base, not just the bare word
+  const saveCollocation = (c: { phrase: string; translation: string }, source: Word) => {
+    const normalizedPhrase = normalizeWord(c.phrase);
+    setWords(prev => {
+      if (prev.some(w => normalizeWord(w.word) === normalizedPhrase)) return prev;
+      const entry: Word = {
+        id: crypto.randomUUID(),
+        word: c.phrase,
+        translation: c.translation,
+        target_lang: targetLanguage,
+        gender: 'none',
+        isPlural: false,
+        infinitive: source.infinitive,
+        infinitiveTranslation: source.infinitiveTranslation,
+        example: '',
+        exampleTranslation: '',
+        tags: 'Expression',
+        created_at: Date.now(),
+        next_review_at: Date.now() + NEW_WORD_FIRST_DELAY,
+        status: 'new',
+        review_count: 0,
+      };
+      return [...prev, entry];
+    });
+    setSavedCollocations(prev => new Set(prev).add(normalizedPhrase));
+    speak(c.phrase);
+  };
 
   // Auto-search with 2s debounce after user stops typing
   useEffect(() => {
@@ -2701,19 +2801,79 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
                         )}
                       </div>
                     )}
+                    {/* Collocations — learn the word in context. Tapping one saves the PHRASE to the base */}
+                    <div className="pt-3 border-t border-indigo-100 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-widest">
+                          En contexte
+                        </p>
+                        <button
+                          onClick={() => fetchCollocations(searchResult)}
+                          disabled={isLoadingCollocations}
+                          className="text-[9px] font-bold uppercase tracking-widest text-indigo-400 hover:text-indigo-600 transition-colors flex items-center gap-1 disabled:opacity-50"
+                        >
+                          {isLoadingCollocations
+                            ? <><Loader2 size={11} className="animate-spin" /> Chargement</>
+                            : <><Sparkles size={11} /> {collocationsFor === searchResult.word && collocations.length > 0 ? "Plus d'exemples" : 'Voir les expressions'}</>}
+                        </button>
+                      </div>
+
+                      {collocationsFor === searchResult.word && collocations.length > 0 ? (
+                        <>
+                          <div className="space-y-1.5">
+                            {collocations.map((c) => {
+                              const saved = savedCollocations.has(normalizeWord(c.phrase))
+                                || words.some(w => normalizeWord(w.word) === normalizeWord(c.phrase));
+                              return (
+                                <button
+                                  key={c.phrase}
+                                  onClick={() => !saved && saveCollocation(c, searchResult)}
+                                  disabled={saved}
+                                  className={`w-full text-left px-3 py-2 rounded-xl border transition-all ${
+                                    saved
+                                      ? 'bg-emerald-50 border-emerald-200 cursor-default'
+                                      : 'bg-white border-indigo-100 hover:border-indigo-300 hover:bg-indigo-50/50 active:scale-[0.99]'
+                                  }`}
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <p className={`text-sm font-bold break-words ${saved ? 'text-emerald-700' : 'text-slate-800'}`}>
+                                        {c.phrase}
+                                      </p>
+                                      <p className="text-[11px] text-slate-500 break-words">{c.translation}</p>
+                                    </div>
+                                    {saved
+                                      ? <CheckCircle2 size={16} className="text-emerald-500 shrink-0 mt-0.5" />
+                                      : <Plus size={16} className="text-indigo-300 shrink-0 mt-0.5" />}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <p className="text-[9px] text-slate-400 leading-snug">
+                            Touchez une expression pour l'ajouter à votre base — vous l'apprendrez en contexte.
+                          </p>
+                        </>
+                      ) : !isLoadingCollocations && (
+                        <p className="text-[10px] text-slate-400 leading-snug">
+                          Chargez des expressions courantes avec ce mot pour l'apprendre en contexte.
+                        </p>
+                      )}
+                    </div>
+
                     <div className="pt-2 flex items-center justify-between border-t border-indigo-100">
                       <span className={`text-[10px] uppercase font-bold tracking-tighter px-2 py-0.5 rounded ${
-                        searchResult.status === 'mastered' ? 'bg-emerald-100 text-emerald-600' : 
+                        searchResult.status === 'mastered' ? 'bg-emerald-100 text-emerald-600' :
                         searchResult.status === 'learning' ? 'bg-amber-100 text-amber-600' : 'bg-slate-100 text-slate-500'
                       }`}>
-                        {searchResult.status === 'mastered' ? 'Appris' : 
+                        {searchResult.status === 'mastered' ? 'Appris' :
                          searchResult.status === 'learning' ? 'En cours' : 'Nouveau'}
                       </span>
                       <span className="text-[10px] text-slate-400 uppercase font-bold tracking-tighter">
                         Révisions: {searchResult.review_count}
                       </span>
                     </div>
-                    
+
                     {suggestions.length > 0 && (
                       <div className="pt-3 border-t border-indigo-50 mt-1">
                         <p className="text-[9px] font-bold uppercase text-slate-400 mb-2">Mots similaires :</p>
