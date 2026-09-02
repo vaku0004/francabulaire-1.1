@@ -1571,17 +1571,21 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
 
     // Forward simulation: replay the real daily rules (50/day, 15 new/day, most-overdue first),
     // assuming every review succeeds — the optimistic bound on how long the queue takes to clear.
-    type Sim = { next: number; count: number; seen: boolean };
+    type Sim = { next: number; count: number; seen: boolean; mastered: boolean };
     const sim: Sim[] = langWords.map(w => ({
       next: w.next_review_at,
       count: w.review_count ?? 0,
       seen: !!w.last_reviewed_at,
+      mastered: w.status === 'mastered',
     }));
 
     const HORIZON = 365;
-    const forecast: { ts: number; load: number; backlog: number }[] = [];
+    const forecast: { ts: number; load: number; backlog: number; seen: number; mastered: number }[] = [];
     let allSeenDayIdx: number | null = null;
-    let clearDayIdx: number | null = null;
+    let allMasteredDayIdx: number | null = null;
+
+    let seenNow = sim.filter(s => s.seen).length;
+    let masteredNow = sim.filter(s => s.mastered).length;
 
     for (let d = 0; d < HORIZON; d++) {
       const dayEnd = t0 + (d + 1) * DAY - 1;
@@ -1595,7 +1599,9 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       const takeNew = newDue.slice(0, Math.min(budget, DAILY_NEW_LIMIT));
 
       [...takeSeen, ...takeNew].forEach(s => {
-        s.seen = true;
+        if (!s.seen) { s.seen = true; seenNow += 1; }
+        // A word is mastered once it survives the whole ladder (5 successful reviews)
+        if (!s.mastered && s.count >= REVIEW_INTERVALS.length) { s.mastered = true; masteredNow += 1; }
         const interval = s.count < REVIEW_INTERVALS.length
           ? REVIEW_INTERVALS[s.count]
           : Math.min(365, 30 * Math.pow(2, s.count - (REVIEW_INTERVALS.length - 1)));
@@ -1605,10 +1611,10 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
 
       const load = takeSeen.length + takeNew.length;
       const backlog = due.length - load;
-      forecast.push({ ts: t0 + d * DAY, load, backlog });
+      forecast.push({ ts: t0 + d * DAY, load, backlog, seen: seenNow, mastered: masteredNow });
 
-      if (allSeenDayIdx === null && sim.every(s => s.seen)) allSeenDayIdx = d;
-      if (clearDayIdx === null && backlog === 0 && allSeenDayIdx !== null) clearDayIdx = d;
+      if (allSeenDayIdx === null && seenNow >= langWords.length) allSeenDayIdx = d;
+      if (allMasteredDayIdx === null && masteredNow >= langWords.length) allMasteredDayIdx = d;
     }
 
     return {
@@ -1618,7 +1624,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       stages,
       forecast,
       allSeenDayIdx,
-      clearDayIdx,
+      allMasteredDayIdx,
       horizon: HORIZON,
     };
     // Keyed on the calendar day, not on clockTick: a full-year simulation must not re-run every minute
@@ -4921,7 +4927,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                     </p>
                   </div>
 
-                  {/* Forecast: how much work is coming, over the chosen horizon */}
+                  {/* Mastery projection: how many words will be learned, and by when */}
                   {(() => {
                     const ranges: { days: 30 | 90 | 180 | 365; label: string }[] = [
                       { days: 30, label: '1 mois' },
@@ -4929,33 +4935,29 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                       { days: 180, label: '6 mois' },
                       { days: 365, label: '1 an' },
                     ];
-                    // Longer horizons are grouped so the chart stays readable
-                    const bucketDays = forecastRange <= 30 ? 1 : forecastRange <= 90 ? 7 : forecastRange <= 180 ? 14 : 30;
-                    const slice = ps.forecast.slice(0, forecastRange);
-                    const buckets: { ts: number; load: number; saturated: boolean; days: number }[] = [];
-                    for (let i = 0; i < slice.length; i += bucketDays) {
-                      const chunk = slice.slice(i, i + bucketDays);
-                      buckets.push({
-                        ts: chunk[0].ts,
-                        load: chunk.reduce((s, f) => s + f.load, 0),
-                        saturated: chunk.some(f => f.backlog > 0),
-                        days: chunk.length,
-                      });
-                    }
-                    const maxBucket = Math.max(1, ...buckets.map(b => b.load));
-                    const periodTotal = buckets.reduce((s, b) => s + b.load, 0);
-                    const unitLabel = bucketDays === 1 ? 'jour' : bucketDays === 30 ? 'mois' : `${bucketDays} j`;
-                    const labelEvery = Math.max(1, Math.ceil(buckets.length / 6));
-                    const fmtBucket = (ts: number) => bucketDays >= 30
-                      ? new Date(ts).toLocaleDateString('fr-FR', { month: 'short', year: '2-digit' })
-                      : fmtDate(ts);
+                    const pts = ps.forecast.slice(0, forecastRange);
+                    const W = 320, H = 110;
+                    const xAt = (i: number) => pts.length > 1 ? (i / (pts.length - 1)) * W : 0;
+                    const yAt = (v: number) => H - (v / Math.max(1, ps.total)) * H;
+                    const line = (key: 'seen' | 'mastered') =>
+                      pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(p[key]).toFixed(1)}`).join(' ');
+                    const area = (key: 'seen' | 'mastered') => `${line(key)} L${W},${H} L0,${H} Z`;
+
+                    const last = pts[pts.length - 1];
+                    const pctOf = (n: number) => ps.total > 0 ? Math.round((n / ps.total) * 100) : 0;
+                    // Milestones inside the simulated year, regardless of the zoom selected
+                    const milestones = [
+                      { label: '3 mois', idx: 89 },
+                      { label: '6 mois', idx: 179 },
+                      { label: '1 an', idx: 364 },
+                    ].map(m => ({ ...m, f: ps.forecast[Math.min(m.idx, ps.forecast.length - 1)] }));
 
                     return (
                       <div className="space-y-3">
                         <div className="flex items-baseline justify-between gap-3 flex-wrap">
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Charge prévue</p>
-                          <span className="text-[10px] font-bold text-indigo-500">
-                            {periodTotal} cartes au total · max {maxBucket}/{unitLabel}
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Progression prévue</p>
+                          <span className="text-[10px] font-bold text-emerald-600">
+                            {last?.mastered ?? 0} / {ps.total} appris ({pctOf(last?.mastered ?? 0)}%)
                           </span>
                         </div>
 
@@ -4975,37 +4977,43 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                           ))}
                         </div>
 
-                        <div className="flex items-end justify-between gap-[2px] h-28 pb-4">
-                          {buckets.map((b, i) => (
-                            <div key={b.ts} className="flex-1 h-full flex flex-col justify-end group relative">
-                              <div className="absolute -top-8 left-1/2 -translate-x-1/2 hidden group-hover:block bg-slate-800 text-white text-[9px] font-bold px-2 py-1 rounded-lg whitespace-nowrap z-10">
-                                {fmtBucket(b.ts)}{bucketDays > 1 ? ` (${b.days} j)` : ''} · {b.load} cartes{b.saturated ? ' · saturé' : ''}
-                              </div>
-                              <div
-                                className={`w-full rounded-t-sm min-h-[2px] ${b.saturated ? 'bg-red-400' : 'bg-indigo-400'}`}
-                                style={{ height: `${(b.load / maxBucket) * 100}%`, opacity: b.load ? 1 : 0.15 }}
-                              />
-                              {i % labelEvery === 0 && (
-                                <span className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[7px] font-bold text-slate-400 whitespace-nowrap">
-                                  {fmtBucket(b.ts)}
-                                </span>
-                              )}
-                            </div>
-                          ))}
+                        <div className="relative">
+                          <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full h-32 rounded-xl bg-slate-50/60">
+                            <line x1="0" y1={H} x2={W} y2={H} stroke="rgb(203 213 225)" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+                            <path d={area('seen')} fill="rgb(199 210 254)" opacity="0.55" />
+                            <path d={area('mastered')} fill="rgb(167 243 208)" opacity="0.75" />
+                            <path d={line('seen')} fill="none" stroke="rgb(99 102 241)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+                            <path d={line('mastered')} fill="none" stroke="rgb(16 185 129)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+                          </svg>
+                          <span className="absolute top-1 left-2 text-[9px] font-bold text-slate-400">{ps.total}</span>
+                          <span className="absolute bottom-1 left-2 text-[9px] font-bold text-slate-400">0</span>
+                          <div className="flex justify-between mt-1 px-1">
+                            <span className="text-[9px] font-bold text-slate-400">aujourd'hui</span>
+                            <span className="text-[9px] font-bold text-slate-400">{last ? fmtDate(last.ts) : ''}</span>
+                          </div>
                         </div>
 
                         <div className="flex items-center gap-4 flex-wrap">
                           <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">
-                            <span className="w-2.5 h-2.5 bg-indigo-400 rounded-sm inline-block" /> Dans la limite
+                            <span className="w-2.5 h-2.5 bg-emerald-400 rounded-sm inline-block" /> Appris
                           </span>
                           <span className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-slate-500">
-                            <span className="w-2.5 h-2.5 bg-red-400 rounded-sm inline-block" /> Limite atteinte
+                            <span className="w-2.5 h-2.5 bg-indigo-300 rounded-sm inline-block" /> Vus au moins une fois
                           </span>
-                          {bucketDays > 1 && (
-                            <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
-                              1 barre = {bucketDays} jours
-                            </span>
-                          )}
+                        </div>
+
+                        {/* The direct answer: where you land at 3 / 6 / 12 months */}
+                        <div className="grid grid-cols-3 gap-2.5 pt-1">
+                          {milestones.map(m => (
+                            <div key={m.label} className="p-3 bg-slate-50 rounded-2xl text-center">
+                              <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Dans {m.label}</p>
+                              <p className="text-xl font-black text-emerald-600 mt-1">{m.f?.mastered ?? 0}</p>
+                              <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400">
+                                appris · {pctOf(m.f?.mastered ?? 0)}%
+                              </p>
+                              <p className="text-[9px] text-indigo-400 font-bold mt-1">{m.f?.seen ?? 0} vus</p>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     );
@@ -5013,22 +5021,27 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
 
                   {/* Plain-language timeline answer */}
                   <div className="p-4 bg-indigo-50/60 border border-indigo-100 rounded-2xl space-y-2">
-                    {ps.unseenCount > 0 ? (
-                      <p className="text-sm text-slate-700 leading-relaxed">
-                        <span className="font-bold">{ps.unseenCount} mots</span> n'ont jamais été vus.
+                    <p className="text-sm text-slate-700 leading-relaxed">
+                      {ps.allMasteredDayIdx !== null
+                        ? <>En révisant chaque jour, vos <span className="font-bold">{ps.total} mots</span> seront tous appris vers le{' '}
+                            <span className="font-bold text-emerald-600">
+                              {new Date(ps.forecast[ps.allMasteredDayIdx].ts).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })}
+                            </span>{' '}
+                            — dans {Math.round((ps.allMasteredDayIdx + 1) / 30)} mois.
+                          </>
+                        : <>Au rythme actuel ({DAILY_REVIEW_LIMIT} cartes et {DAILY_NEW_LIMIT} nouveaux mots par jour),
+                            vos {ps.total} mots ne seront pas tous appris avant un an — à la fin de l'année vous en aurez{' '}
+                            <span className="font-bold text-emerald-600">
+                              {ps.forecast[ps.forecast.length - 1]?.mastered ?? 0}
+                            </span>.
+                          </>}
+                    </p>
+                    {ps.unseenCount > 0 && (
+                      <p className="text-xs text-slate-600">
+                        {ps.unseenCount} mots jamais vus
                         {ps.allSeenDayIdx !== null
-                          ? <> En révisant chaque jour, vous les aurez tous vus au moins une fois vers le{' '}
-                              <span className="font-bold text-indigo-600">
-                                {fmtDate(ps.forecast[ps.allSeenDayIdx].ts)}
-                              </span>{' '}
-                              (dans {ps.allSeenDayIdx + 1} jours).
-                            </>
-                          : <> Au rythme de {DAILY_NEW_LIMIT} nouveaux mots par jour, il faudra plus de {ps.horizon} jours pour tous les voir.</>}
-                      </p>
-                    ) : (
-                      <p className="text-sm text-slate-700 leading-relaxed">
-                        <span className="font-bold text-emerald-600">Tous vos mots ont déjà été vus au moins une fois.</span>{' '}
-                        Il ne reste que les répétitions programmées.
+                          ? <> — tous découverts vers le <span className="font-bold text-indigo-600">{fmtDate(ps.forecast[ps.allSeenDayIdx].ts)}</span>.</>
+                          : <> — plus de {ps.horizon} jours pour tous les découvrir.</>}
                       </p>
                     )}
                     {overdueCount > 0 && (
