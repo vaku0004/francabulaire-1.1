@@ -54,7 +54,8 @@ const NEW_WORD_FIRST_DELAY = 10 * 60 * 1000; // learning step: first review 10 m
 const DAILY_REVIEW_LIMIT = 50; // Max cards per day
 const DAILY_NEW_LIMIT = 15;    // Max brand-new words introduced per day
 const EXERCISE_SESSION_SIZE = 15; // Words per session in reverse practice / quiz / match / typing
-const COMPOSE_SESSION_SIZE = 5;   // Words per session in the compose-a-sentence activity
+const COMPOSE_SESSION_SIZE = 15;      // Words per standalone compose-a-sentence session
+const COMPOSE_COMBO_SESSION_SIZE = 5; // Shorter leg inside the full combo session
 
 // Exercise words are organized into 3 tiers mirroring flashcard grades.
 // A word graduates one tier on a correct exercise answer, and repeats within
@@ -453,6 +454,8 @@ Règles importantes :
 
   const [isReviewing, setIsReviewing] = useState(false);
   const [reviewPaused, setReviewPaused] = useState(false);
+  // Extra cards the learner explicitly asked for beyond today's limit (resets on reload)
+  const [bonusCards, setBonusCards] = useState(0);
   const [sessionQueue, setSessionQueue] = useState<Word[]>([]);
   // Ticks every minute so time-based queues (e.g. "forgotten, retry in 1h") refresh without a reload
   const [clockTick, setClockTick] = useState(0);
@@ -617,6 +620,7 @@ Règles importantes :
   const [composeFeedback, setComposeFeedback] = useState<{ wordOk: boolean; corrected: string; feedback: string } | null>(null);
   const [composeSession, setComposeSession] = useState({ done: 0, correct: 0 });
   const [composeSessionOver, setComposeSessionOver] = useState(false);
+  const [composeLimit, setComposeLimit] = useState(COMPOSE_SESSION_SIZE);
 
   // Combo session: chains all 6 activities —
   // Rappel actif (10) → Relier les mots (15) → Quiz (15) → Écrivez le mot (5) → Phrases (5) → Composez (5) = 55 words
@@ -1032,10 +1036,12 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
 
   // ===== Compose activity: write your own sentence with the word, AI verifies usage =====
 
-  const startComposeActivity = () => {
+  const startComposeActivity = (limit?: unknown) => {
+    const sessionSize = typeof limit === 'number' ? limit : COMPOSE_SESSION_SIZE;
     sessionSeenIds.current = new Set();
     const [pulled] = pullWords(1, HARD_ORDER);
     if (!pulled) { alert("Révisez d'abord quelques mots en mode cartes !"); return; }
+    setComposeLimit(sessionSize);
     setComposeWord(pulled.word);
     setComposeTier(pulled.tier);
     setComposeInput('');
@@ -1043,6 +1049,22 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
     setComposeSession({ done: 0, correct: 0 });
     setComposeSessionOver(false);
     setIsComposeModalOpen(true);
+  };
+
+  // Skip the current word: it goes back to the END of its tier, so it returns in a later cycle,
+  // and it stays out of THIS session (sessionSeenIds already holds it). Skips don't count as answers.
+  const skipComposeWord = () => {
+    if (!composeWord || !composeTier || composeChecking || composeFeedback) return;
+    const skipped = composeWord;
+    const tier = composeTier;
+    setExerciseBuckets(prev => ({ ...prev, [tier]: [...prev[tier], skipped] }));
+
+    const [pulled] = pullWords(1, HARD_ORDER);
+    if (!pulled) { setComposeSessionOver(true); setComposeWord(null); setComposeTier(null); return; }
+    setComposeWord(pulled.word);
+    setComposeTier(pulled.tier);
+    setComposeInput('');
+    setComposeFeedback(null);
   };
 
   const checkComposeSentence = async () => {
@@ -1086,7 +1108,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     const wasCorrect = !!composeFeedback?.wordOk;
     const next = { done: composeSession.done + 1, correct: composeSession.correct + (wasCorrect ? 1 : 0) };
     setComposeSession(next);
-    if (next.done >= COMPOSE_SESSION_SIZE) {
+    if (next.done >= composeLimit) {
       setComposeSessionOver(true);
       setComposeWord(null);
       setComposeTier(null);
@@ -1424,7 +1446,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
   // - of which max DAILY_NEW_LIMIT brand-new words
   // - ORDER: most-overdue first. A word due 5 days ago is on the edge of being lost and
   //   must come before everything else; new words enter ONLY when the review backlog fits today.
-  const { reviewQueue, overdueCount } = useMemo(() => {
+  const { reviewQueue, overdueCount, heldBackCount } = useMemo(() => {
     const now = Date.now();
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
@@ -1450,7 +1472,8 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     const reviewedToday = words.filter(w => matchesLang(w) && w.last_reviewed_at && w.last_reviewed_at >= todayTs).length;
     const newIntroducedToday = words.filter(w => matchesLang(w) && w.first_reviewed_at && w.first_reviewed_at >= todayTs).length;
 
-    let budget = Math.max(0, DAILY_REVIEW_LIMIT - reviewedToday);
+    // bonusCards = extra cards the learner explicitly requested beyond today's limit
+    let budget = Math.max(0, DAILY_REVIEW_LIMIT + bonusCards - reviewedToday);
 
     const queue: Word[] = [];
 
@@ -1465,14 +1488,17 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     budget -= seenTake.length;
 
     // New words enter only when the whole review backlog fits in today's budget
-    const newBudget = Math.min(budget, Math.max(0, DAILY_NEW_LIMIT - newIntroducedToday));
-    queue.push(...newWords.slice(0, newBudget));
+    const newBudget = Math.min(budget, Math.max(0, DAILY_NEW_LIMIT + bonusCards - newIntroducedToday));
+    const newTake = newWords.slice(0, newBudget);
+    queue.push(...newTake);
 
-    // Review debt: due words that did NOT fit into today's limit
+    // Review debt: due REVIEWS that did NOT fit into today's limit (drives the ⏰ indicator)
     const debt = (retries.length - retryTake.length) + (seenDue.length - seenTake.length);
+    // Everything due but held back — how many more cards "continue anyway" could still show
+    const heldBack = debt + (newWords.length - newTake.length);
 
-    return { reviewQueue: queue, overdueCount: debt };
-  }, [words, isReviewing, targetLanguage, clockTick]);
+    return { reviewQueue: queue, overdueCount: debt, heldBackCount: heldBack };
+  }, [words, isReviewing, targetLanguage, clockTick, bonusCards]);
 
   const currentWord = sessionQueue[currentReviewIndex];
 
@@ -2381,6 +2407,22 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                         <RotateCcw size={16} />
                         Reprendre la révision
                       </button>
+                    )}
+
+                    {/* Daily limit reached but more words are waiting — let the learner go past it */}
+                    {reviewQueue.length === 0 && heldBackCount > 0 && (
+                      <div className="space-y-2">
+                        <button
+                          onClick={() => { setBonusCards(b => b + 20); setReviewPaused(false); }}
+                          className="px-8 py-3 bg-indigo-600 text-white rounded-2xl font-bold text-sm uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 flex items-center gap-2 mx-auto"
+                        >
+                          <Plus size={16} />
+                          Encore {Math.min(20, heldBackCount)} cartes
+                        </button>
+                        <p className="text-[11px] text-slate-400 max-w-xs mx-auto">
+                          Limite du jour atteinte — {heldBackCount} mots attendent encore.
+                        </p>
+                      </div>
                     )}
                   </motion.div>
                 ) : (
@@ -3811,7 +3853,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                                 setComboResults(prev => ({ ...prev, text: { correct: textCorrect, total: textTotal } }));
                                 setIsTextExerciseModalOpen(false);
                                 setComboMode('compose');
-                                startComposeActivity();
+                                startComposeActivity(COMPOSE_COMBO_SESSION_SIZE);
                               }
                             }
                           }}
@@ -4460,7 +4502,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                   <div>
                     <h3 className="text-xl font-bold text-slate-900">Composez une phrase</h3>
                     <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
-                      {composeSessionOver ? 'Session terminée' : `Mot ${composeSession.done + 1} sur ${COMPOSE_SESSION_SIZE}`}
+                      {composeSessionOver ? 'Session terminée' : `Mot ${composeSession.done + 1} sur ${composeLimit}`}
                     </p>
                   </div>
                 </div>
@@ -4568,19 +4610,30 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                 )}
 
                 {!composeFeedback && (
-                  <button
-                    onClick={checkComposeSentence}
-                    disabled={composeChecking || composeInput.trim().length < 3}
-                    className={`w-full py-3.5 rounded-2xl font-bold text-sm uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 ${
-                      composeChecking
-                        ? 'bg-rose-300 text-white cursor-wait'
-                        : composeInput.trim().length >= 3
-                          ? 'bg-rose-500 text-white hover:bg-rose-600 active:scale-[0.98] shadow-rose-100'
-                          : 'bg-slate-100 text-slate-400 shadow-none cursor-not-allowed'
-                    }`}
-                  >
-                    {composeChecking ? (<><Loader2 size={16} className="animate-spin" /> Vérification...</>) : 'Vérifier ma phrase'}
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={skipComposeWord}
+                      disabled={composeChecking}
+                      className="px-4 py-3.5 rounded-2xl border-2 border-slate-200 text-slate-500 font-bold text-xs uppercase tracking-widest hover:bg-slate-50 hover:border-slate-300 active:scale-[0.98] transition-all shrink-0 disabled:opacity-40 flex items-center gap-1.5"
+                      title="Passer ce mot — il reviendra plus tard"
+                    >
+                      <ChevronRight size={16} />
+                      Passer
+                    </button>
+                    <button
+                      onClick={checkComposeSentence}
+                      disabled={composeChecking || composeInput.trim().length < 3}
+                      className={`flex-1 py-3.5 rounded-2xl font-bold text-sm uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 ${
+                        composeChecking
+                          ? 'bg-rose-300 text-white cursor-wait'
+                          : composeInput.trim().length >= 3
+                            ? 'bg-rose-500 text-white hover:bg-rose-600 active:scale-[0.98] shadow-rose-100'
+                            : 'bg-slate-100 text-slate-400 shadow-none cursor-not-allowed'
+                      }`}
+                    >
+                      {composeChecking ? (<><Loader2 size={16} className="animate-spin" /> Vérification...</>) : 'Vérifier ma phrase'}
+                    </button>
+                  </div>
                 )}
               </div>
               )}
