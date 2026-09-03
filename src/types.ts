@@ -17,6 +17,8 @@ export interface Word {
   last_reviewed_at?: number;
   first_reviewed_at?: number;
   last_grade?: ReviewGrade;
+  /** Common phrases built around this word, cached so they load once and show instantly. */
+  collocations?: { phrase: string; translation: string }[];
 }
 
 export type ReviewGrade = 'remembered' | 'almost' | 'forgotten';

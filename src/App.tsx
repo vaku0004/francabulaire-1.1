@@ -405,8 +405,6 @@ Règles importantes :
   const [suggestions, setSuggestions] = useState<string[]>([]);
   // Collocations for the word currently shown in the dictionary — learning in context.
   // Clicking one saves the PHRASE to the base instead of the bare word.
-  const [collocations, setCollocations] = useState<{ phrase: string; translation: string }[]>([]);
-  const [collocationsFor, setCollocationsFor] = useState<string>('');
   const [isLoadingCollocations, setIsLoadingCollocations] = useState(false);
   const [savedCollocations, setSavedCollocations] = useState<Set<string>>(new Set());
   const pendingTranslations = React.useRef<Set<string>>(new Set());
@@ -1735,8 +1733,6 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     setIsSearching(true);
     setError(null);
     setSuggestions([]);
-    setCollocations([]);
-    setCollocationsFor('');
 
     // A slow/overloaded service must NOT be reported as "word not found" — that sends the
     // learner hunting for a dictionary problem that doesn't exist.
@@ -1801,18 +1797,14 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
         const finalWord = result.frenchWord;
         const normalizedFinal = normalizeWord(finalWord);
 
-        // Collocations come free with the same call — show them under the result
-        if (Array.isArray(result.collocations)) {
-          const cleaned = result.collocations
-            .filter((c: any) => c && typeof c.phrase === 'string' && c.phrase.trim() && typeof c.translation === 'string')
-            .map((c: any) => ({ phrase: c.phrase.trim(), translation: c.translation.trim() }))
-            .filter((c: any) => normalizeWord(c.phrase) !== normalizedFinal)
-            .slice(0, 6);
-          if (cleaned.length > 0) {
-            setCollocations(cleaned);
-            setCollocationsFor(finalWord);
-          }
-        }
+        // Collocations come free with the same call — cached on the word so they show instantly next time
+        const freshCollocations: { phrase: string; translation: string }[] = Array.isArray(result.collocations)
+          ? result.collocations
+              .filter((c: any) => c && typeof c.phrase === 'string' && c.phrase.trim() && typeof c.translation === 'string')
+              .map((c: any) => ({ phrase: c.phrase.trim(), translation: c.translation.trim() }))
+              .filter((c: { phrase: string }) => normalizeWord(c.phrase) !== normalizedFinal)
+              .slice(0, 6)
+          : [];
 
         const newWord: Word = {
           id: crypto.randomUUID(),
@@ -1829,7 +1821,8 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
           created_at: Date.now(),
           next_review_at: Date.now() + NEW_WORD_FIRST_DELAY, // learning step: first review in ~10 min
           status: 'new',
-          review_count: 0
+          review_count: 0,
+          collocations: freshCollocations.length > 0 ? freshCollocations : undefined
         };
 
         setWords(prev => {
@@ -1849,6 +1842,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               infinitiveTranslation: result.infinitiveTranslation || updated[existingIdx].infinitiveTranslation,
               example: result.example || updated[existingIdx].example,
               exampleTranslation: result.exampleTranslation || updated[existingIdx].exampleTranslation,
+              collocations: freshCollocations.length > 0 ? freshCollocations : updated[existingIdx].collocations,
             };
             return updated;
           }
@@ -1897,7 +1891,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
       const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
       if (!apiKey) throw new Error("Clé API introuvable");
       const ai = new GoogleGenAI({ apiKey });
-      const already = collocationsFor === word.word ? collocations.map(c => c.phrase) : [];
+      const already = (word.collocations ?? []).map(c => c.phrase);
       const response = await generateWithFallback(ai, {
         contents: `Donne 4 expressions françaises COURANTES construites autour du mot "${word.word}" (${word.translation}).
 
@@ -1923,8 +1917,11 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
           seen.add(k);
           return true;
         });
-      setCollocations(prev => (collocationsFor === word.word ? [...prev, ...fresh] : fresh));
-      setCollocationsFor(word.word);
+      if (fresh.length === 0) throw new Error('no new collocations');
+      // Cache on the word itself: fetched once, then shown instantly and offline
+      setWords(prev => prev.map(w =>
+        w.id === word.id ? { ...w, collocations: [...(w.collocations ?? []), ...fresh] } : w
+      ));
     } catch (e) {
       console.error('Collocations error:', e);
       alert("Impossible de charger les expressions. Réessayez.");
@@ -1932,6 +1929,17 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       setIsLoadingCollocations(false);
     }
   };
+
+  // Words already in the base never trigger a translation call, so they would show no phrases
+  // until the learner clicked. Fetch them once, automatically, the first time the word is displayed.
+  const autoCollocationTried = React.useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!searchResult || isSearching || isLoadingCollocations) return;
+    if (searchResult.collocations && searchResult.collocations.length > 0) return;
+    if (autoCollocationTried.current.has(searchResult.id)) return;
+    autoCollocationTried.current.add(searchResult.id);
+    fetchCollocations(searchResult);
+  }, [searchResult, isSearching]);
 
   // Save a collocation as its own entry — this is the "learn in context" path:
   // the phrase enters the base, not just the bare word
@@ -3018,14 +3026,14 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                         >
                           {isLoadingCollocations
                             ? <><Loader2 size={11} className="animate-spin" /> Chargement</>
-                            : <><Sparkles size={11} /> {collocationsFor === searchResult.word && collocations.length > 0 ? "Plus d'exemples" : 'Voir les expressions'}</>}
+                            : <><Sparkles size={11} /> {(searchResult.collocations?.length ?? 0) > 0 ? "Plus d'exemples" : 'Voir les expressions'}</>}
                         </button>
                       </div>
 
-                      {collocationsFor === searchResult.word && collocations.length > 0 ? (
+                      {(searchResult.collocations?.length ?? 0) > 0 ? (
                         <>
                           <div className="space-y-1.5">
-                            {collocations.map((c) => {
+                            {(searchResult.collocations ?? []).map((c) => {
                               const saved = savedCollocations.has(normalizeWord(c.phrase))
                                 || words.some(w => normalizeWord(w.word) === normalizeWord(c.phrase));
                               return (
@@ -3058,9 +3066,14 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                             Touchez une expression pour l'ajouter à votre base — vous l'apprendrez en contexte.
                           </p>
                         </>
-                      ) : !isLoadingCollocations && (
+                      ) : isLoadingCollocations ? (
+                        <div className="flex items-center gap-2 py-1">
+                          <Loader2 size={12} className="animate-spin text-indigo-400" />
+                          <p className="text-[10px] text-slate-400">Recherche d'expressions courantes...</p>
+                        </div>
+                      ) : (
                         <p className="text-[10px] text-slate-400 leading-snug">
-                          Chargez des expressions courantes avec ce mot pour l'apprendre en contexte.
+                          Aucune expression pour ce mot — touchez « Voir les expressions » pour réessayer.
                         </p>
                       )}
                     </div>
