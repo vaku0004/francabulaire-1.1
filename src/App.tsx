@@ -66,13 +66,15 @@ type ExBuckets = Record<ExTier, Word[]>;
 const EMPTY_BUCKETS: ExBuckets = { forgotten: [], almost: [], remembered: [] };
 
 // Keep in sync with ALLOWED_MODELS in api/_gemini.ts — the proxy rejects
-// anything not on that list. gemini-2.5-flash{,-lite} were dropped: Google
-// no longer serves them to projects created after the 2026 cutoff.
+// anything not on that list. Ordered by measured latency against a free-tier
+// key, not by version: the newer flash models are slower or flakier here, and
+// the search path gives up after 30s. gemini-3.5-flash-lite and
+// gemini-flash-latest were measured at 22-53s and left out for that reason.
 const FALLBACK_MODELS = [
   "gemini-3.1-flash-lite",
-  "gemini-3.5-flash-lite",
+  "gemini-3.5-flash",
+  "gemini-3.7-flash",
   "gemma-4-26b-a4b-it",
-  "gemini-3-flash-preview",
 ];
 
 async function generateWithFallback(params: any): Promise<any> {
