@@ -65,12 +65,14 @@ type ExTier = 'forgotten' | 'almost' | 'remembered';
 type ExBuckets = Record<ExTier, Word[]>;
 const EMPTY_BUCKETS: ExBuckets = { forgotten: [], almost: [], remembered: [] };
 
+// Keep in sync with ALLOWED_MODELS in api/_gemini.ts — the proxy rejects
+// anything not on that list. gemini-2.5-flash{,-lite} were dropped: Google
+// no longer serves them to projects created after the 2026 cutoff.
 const FALLBACK_MODELS = [
   "gemini-3.1-flash-lite",
+  "gemini-3.5-flash-lite",
   "gemma-4-26b-a4b-it",
-  "gemini-2.5-flash-lite",
   "gemini-3-flash-preview",
-  "gemini-2.5-flash",
 ];
 
 async function generateWithFallback(params: any): Promise<any> {
@@ -81,7 +83,9 @@ async function generateWithFallback(params: any): Promise<any> {
       return response;
     } catch (err: any) {
       const code = (() => { try { return JSON.parse(err.message)?.error?.code; } catch { return null; } })();
-      if (code === 429 || code === 503 || code === 500) {
+      // 404 means the model was retired for this project — keep going,
+      // otherwise one dead entry kills the rest of the chain.
+      if (code === 404 || code === 429 || code === 503 || code === 500) {
         lastError = err;
         continue; // try next model
       }
