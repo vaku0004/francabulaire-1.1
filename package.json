@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/verify-no-secrets.mjs",
     "preview": "vite preview",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "verify:secrets": "node scripts/verify-no-secrets.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.50.1",

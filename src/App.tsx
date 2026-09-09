@@ -39,7 +39,8 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Word, ReviewGrade } from './types';
-import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
+import { Type, ThinkingLevel } from "@google/genai";
+import { generateContent, describeGeminiError } from "./lib/gemini";
 import { auth, db, googleProvider } from './lib/firebase';
 import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 import { doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
@@ -72,11 +73,11 @@ const FALLBACK_MODELS = [
   "gemini-2.5-flash",
 ];
 
-async function generateWithFallback(ai: any, params: any): Promise<any> {
+async function generateWithFallback(params: any): Promise<any> {
   let lastError: any;
   for (const model of FALLBACK_MODELS) {
     try {
-      const response = await ai.models.generateContent({ ...params, model });
+      const response = await generateContent({ ...params, model });
       return response;
     } catch (err: any) {
       const code = (() => { try { return JSON.parse(err.message)?.error?.code; } catch { return null; } })();
@@ -179,9 +180,6 @@ export default function App() {
     batchWrongWordIds.current.clear();
 
     try {
-      const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
-      if (!apiKey) throw new Error("Clé API не найдена.");
-      const ai = new GoogleGenAI({ apiKey });
 
       // Merge newly-eligible words + return any previous unfinished batch to its tier — commit immediately (safe, non-destructive)
       let buckets = getOrBuildBuckets();
@@ -209,7 +207,7 @@ export default function App() {
 
       const wordListStr = selectedWords.map(w => w.word).join(', ');
 
-      const response = await generateWithFallback(ai, {
+      const response = await generateWithFallback({
         contents: `Tu es un professeur de français NATIF et rigoureux. Pour chaque mot de la liste, écris UNE phrase simple et naturelle en français (niveau A2-B1) où ce mot est manquant et doit être deviné grâce au contexte.
 
 Les phrases sont INDÉPENDANTES les unes des autres — pas besoin de les relier en histoire.
@@ -274,7 +272,7 @@ Règles importantes :
       }
     } catch (error) {
       console.error("Error generating story:", error);
-      alert("Erreur de génération. Vérifiez votre connexion et réessayez.");
+      alert(describeGeminiError(error, "Erreur de génération. Vérifiez votre connexion et réessayez."));
     } finally {
       setIsStoryLoading(false);
     }
@@ -288,12 +286,7 @@ Règles importantes :
     
     setIsTranslatingLibrary(true);
     try {
-      const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("Clé API introuvable.");
-      }
 
-      const ai = new GoogleGenAI({ apiKey });
       
       // Process in small batches
       const batchSize = 10;
@@ -303,7 +296,7 @@ Règles importantes :
         const batch = wordsToTranslate.slice(i, i + batchSize);
         const wordList = batch.map(w => w.word).join(', ');
 
-        const response = await generateWithFallback(ai, {
+        const response = await generateWithFallback({
           contents: `Translate these French words/expressions to ${langObj.aiName}: ${wordList}.
           
           Guidelines:
@@ -949,10 +942,7 @@ Règles importantes :
   // AI invents 3 plausible wrong translations of the SAME part of speech and form
   const generateQuizDistractors = async (target: Word): Promise<string[] | null> => {
     try {
-      const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
-      if (!apiKey) return null;
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await generateWithFallback(ai, {
+      const response = await generateWithFallback({
         contents: `Tu prépares un quiz de vocabulaire français.
 Mot français : "${target.word}"
 Traduction correcte en ${currentLangObj.aiName} : "${target.translation}"
@@ -1112,10 +1102,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown : {"options":["...","...","
     if (!composeWord || composeChecking || composeFeedback || composeInput.trim().length < 3) return;
     setComposeChecking(true);
     try {
-      const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
-      if (!apiKey) throw new Error("Clé API introuvable");
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await generateWithFallback(ai, {
+      const response = await generateWithFallback({
         contents: `Tu es un professeur de français bienveillant. L'apprenant étudie le mot "${composeWord.word}" (traduction : "${composeWord.translation}").
 Il a écrit cette phrase pour s'entraîner : "${composeInput.trim()}"
 
@@ -1139,7 +1126,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       recordExerciseActivity();
     } catch (e) {
       console.error('Compose check error:', e);
-      alert("Erreur de vérification. Réessayez.");
+      alert(describeGeminiError(e, "Erreur de vérification. Réessayez."));
     } finally {
       setComposeChecking(false);
     }
@@ -1744,11 +1731,6 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     }, 30000);
 
     try {
-      // Robust API key detection in frontend
-      const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("Clé API не найдена. Пожалуйста, проверьте настройки (Secrets) в AI Studio.");
-      }
 
       // Detect script: Cyrillic → user is typing in their native language → translate TO French
       const hasCyrillic = /[Ѐ-ӿ]/.test(query.trim());
@@ -1779,8 +1761,7 @@ If the word has a typo or is misspelled (only for French words), set found:false
 If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
 {"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[],"collocations":[{"phrase":"...","translation":"..."}]}`;
 
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await generateWithFallback(ai, {
+      const response = await generateWithFallback({
         contents: prompt,
         config: {}
       });
@@ -1888,11 +1869,8 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
     if (isLoadingCollocations) return;
     setIsLoadingCollocations(true);
     try {
-      const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
-      if (!apiKey) throw new Error("Clé API introuvable");
-      const ai = new GoogleGenAI({ apiKey });
       const already = (word.collocations ?? []).map(c => c.phrase);
-      const response = await generateWithFallback(ai, {
+      const response = await generateWithFallback({
         contents: `Donne 4 expressions françaises COURANTES construites autour du mot "${word.word}" (${word.translation}).
 
 Règles :
@@ -1924,7 +1902,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       ));
     } catch (e) {
       console.error('Collocations error:', e);
-      alert("Impossible de charger les expressions. Réessayez.");
+      alert(describeGeminiError(e, "Impossible de charger les expressions. Réessayez."));
     } finally {
       setIsLoadingCollocations(false);
     }
@@ -2072,13 +2050,8 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     setIsUploading(true);
     setError(null);
     try {
-      const apiKey = process.env.GEMINI_API_KEY || (window as any).GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("Clé API не найдена.");
-      }
 
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await generateWithFallback(ai, {
+      const response = await generateWithFallback({
         contents: `Extract French vocabulary from the following text: ${text.substring(0, 5000)}.
         Identify word, translation in ${targetLanguage}, gender (m/f/none), isPlural, infinitive, and examples.
         If a word is a verb, always fill "infinitive" (use the same word if it's already the infinitive) and "infinitiveTranslation". If it's not a verb, leave both empty.

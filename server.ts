@@ -2,6 +2,8 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import "dotenv/config";
+import { serveGemini } from "./api/_node-adapter.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,7 +12,14 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  app.use(express.json({ limit: "256kb" }));
+
+  // Прокси к Gemini — до статики, иначе SPA-fallback перехватит запрос.
+  // app.all, а не app.post: иначе GET проваливается в SPA-фолбэк ниже
+  // и вместо 405 отдаёт index.html.
+  app.all("/api/gemini", async (req, res) => {
+    await serveGemini(req as any, res as any);
+  });
 
   // Static files and SPA fallback
   const distPath = path.join(__dirname, "dist");
