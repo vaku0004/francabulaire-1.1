@@ -38,7 +38,7 @@ import {
   Zap
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Word, ReviewGrade } from './types';
+import { Word, ReviewGrade, CefrLevel, CEFR_LEVELS } from './types';
 import { Type, ThinkingLevel } from "@google/genai";
 import { generateContent, describeGeminiError } from "./lib/gemini";
 import { auth, db, googleProvider } from './lib/firebase';
@@ -76,6 +76,56 @@ const FALLBACK_MODELS = [
   "gemini-3.7-flash",
   "gemma-4-26b-a4b-it",
 ];
+
+// CEFR helpers — levels come from the AI, so anything outside A1..C2 is treated as unknown
+function toCefr(v: unknown): CefrLevel | undefined {
+  const s = String(v ?? '').trim().toUpperCase();
+  return (CEFR_LEVELS as string[]).includes(s) ? (s as CefrLevel) : undefined;
+}
+// Unknown level sorts after C2, so already-classified words come first
+function cefrRank(w: Word): number {
+  return w.cefr ? CEFR_LEVELS.indexOf(w.cefr) : CEFR_LEVELS.length;
+}
+const CEFR_BADGE: Record<CefrLevel, string> = {
+  A1: 'bg-emerald-100 text-emerald-700',
+  A2: 'bg-teal-100 text-teal-700',
+  B1: 'bg-sky-100 text-sky-700',
+  B2: 'bg-indigo-100 text-indigo-700',
+  C1: 'bg-violet-100 text-violet-700',
+  C2: 'bg-fuchsia-100 text-fuchsia-700',
+};
+
+// Edit distance with an early exit once it exceeds `max` — used to spot near-duplicate words
+function levenshtein(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      const v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      cur[j] = v;
+      if (v < rowMin) rowMin = v;
+    }
+    if (rowMin > max) return max + 1;
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+// Key-order-independent JSON: Firestore does not preserve field order and drops undefined,
+// so a plain JSON.stringify comparison would flag identical data as "different".
+function stableStringify(v: any): string {
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  if (v && typeof v === 'object') {
+    return '{' + Object.keys(v)
+      .filter(k => v[k] !== undefined)
+      .sort()
+      .map(k => JSON.stringify(k) + ':' + stableStringify(v[k]))
+      .join(',') + '}';
+  }
+  return JSON.stringify(v);
+}
 
 async function generateWithFallback(params: any): Promise<any> {
   let lastError: any;
@@ -116,6 +166,10 @@ function extractJson(response: any): string {
 export default function App() {
   // Refs declared at the very top so exercise functions can reliably access them
   const batchWrongWordIds = React.useRef<Set<string>>(new Set());
+  // Cloud sync bookkeeping — prevents our own write echoes from reverting newer local grades
+  const lastSyncedJson = React.useRef<string>('');
+  const pendingSave = React.useRef(false);
+  const saveSeq = React.useRef(0);
   const matchWrongWordIds = React.useRef<Set<string>>(new Set());
   // Which tier each in-flight word was pulled from, keyed by word id
   const currentExerciseBatchTiers = React.useRef<Record<string, ExTier>>({});
@@ -405,6 +459,11 @@ Règles importantes :
   // Collocations for the word currently shown in the dictionary — learning in context.
   // Clicking one saves the PHRASE to the base instead of the bare word.
   const [isLoadingCollocations, setIsLoadingCollocations] = useState(false);
+  // CEFR level detection for words already in the base
+  const [isDetectingLevels, setIsDetectingLevels] = useState(false);
+  const [levelProgress, setLevelProgress] = useState({ done: 0, total: 0 });
+  // Duplicate finder view inside the word list
+  const [showDuplicates, setShowDuplicates] = useState(false);
   const [savedCollocations, setSavedCollocations] = useState<Set<string>>(new Set());
   const pendingTranslations = React.useRef<Set<string>>(new Set());
   const lastFetchedQuery = React.useRef<string>('');
@@ -420,6 +479,9 @@ Règles importantes :
   
   const stripArticles = (str: string) => 
     str.replace(/^(le\s|la\s|les\s|l'|l’|un\s|une\s|des\s)/i, '').trim();
+
+  // Identity of a word for duplicate checks: "Le chat", "chat" and "chât" are the same entry
+  const dedupeKey = (str: string) => normalizeWord(stripArticles(str.trim()));
   
   const getWordWithArticle = (word: string, gender?: 'm' | 'f' | 'none', isPlural?: boolean) => {
     if (!gender || gender === 'none') return word;
@@ -1357,7 +1419,9 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       // Initial load
       getDoc(userDocRef).then((docSnap) => {
         if (docSnap.exists()) {
-          setWords(docSnap.data().words || []);
+          const loaded = docSnap.data().words || [];
+          lastSyncedJson.current = stableStringify(loaded);
+          setWords(loaded);
           setSyncError(null);
         }
         setHasLoaded(true);
@@ -1375,16 +1439,20 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
 
       // Listen for remote changes
       const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
-        if (docSnap.exists()) {
-          const remoteWords = docSnap.data().words || [];
-          setWords(prev => {
-            if (JSON.stringify(prev) !== JSON.stringify(remoteWords)) {
-              return remoteWords;
-            }
-            return prev;
-          });
-          setSyncError(null);
-        }
+        // Our own write, echoed back before the server confirms it
+        if (docSnap.metadata.hasPendingWrites) return;
+        if (!docSnap.exists()) return;
+        const remoteWords = docSnap.data().words || [];
+        const remoteJson = stableStringify(remoteWords);
+        // Echo of what we last saved — local state may already be newer, keep it
+        if (remoteJson === lastSyncedJson.current) return;
+        // Local grades not yet flushed: they win, and will be written shortly.
+        // (Applying remote here is exactly what used to bring reviewed cards back.)
+        if (pendingSave.current) return;
+        // A genuine change from another device/tab
+        lastSyncedJson.current = remoteJson;
+        setWords(remoteWords);
+        setSyncError(null);
       }, (err) => {
         console.error("Snapshot error:", err);
         if (err.message?.includes('permission-denied')) {
@@ -1426,14 +1494,29 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     };
 
     if (user && db) {
+      const json = stableStringify(words);
+      if (json === lastSyncedJson.current) {
+        // Nothing new to write (e.g. we just applied a remote change). Any earlier timer was
+        // cleared by the effect cleanup, so nothing is pending anymore.
+        saveSeq.current++;
+        pendingSave.current = false;
+        return;
+      }
+
       // Debounce: batch rapid changes (e.g. grading cards) into one write
+      const seq = ++saveSeq.current;
+      pendingSave.current = true;
       const timer = setTimeout(async () => {
         try {
           const userDocRef = doc(db, 'users', user.uid);
           const sanitizedWords = sanitizeForFirestore(words);
           await setDoc(userDocRef, { words: sanitizedWords }, { merge: true });
+          lastSyncedJson.current = json;
         } catch (e) {
           console.error("Error saving to Firestore:", e);
+        } finally {
+          // Only the latest scheduled save may clear the flag
+          if (seq === saveSeq.current) pendingSave.current = false;
         }
       }, 1500);
       return () => clearTimeout(timer);
@@ -1500,8 +1583,12 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     const retries = due.filter(w => w.last_reviewed_at && w.last_reviewed_at >= todayTs).sort(byOverdue);
     // Seen words due for a scheduled review, most overdue first
     const seenDue = due.filter(w => w.last_reviewed_at && w.last_reviewed_at < todayTs).sort(byOverdue);
-    // Brand-new words never shown before (oldest added first)
-    const newWords = due.filter(w => !w.last_reviewed_at).sort((a, b) => a.created_at - b.created_at);
+    // Brand-new words never shown before: easiest CEFR level first (A1 → C2, unknown last),
+    // then oldest added first. Reviews are NOT reordered by level — they must stay
+    // most-overdue-first, or words slip past their interval and get forgotten.
+    const newWords = due
+      .filter(w => !w.last_reviewed_at)
+      .sort((a, b) => (cefrRank(a) - cefrRank(b)) || (a.created_at - b.created_at));
 
     const reviewedToday = words.filter(w => matchesLang(w) && w.last_reviewed_at && w.last_reviewed_at >= todayTs).length;
     const newIntroducedToday = words.filter(w => matchesLang(w) && w.first_reviewed_at && w.first_reviewed_at >= todayTs).length;
@@ -1744,7 +1831,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
         ? `The user typed "${query.trim()}" in ${currentLangObj.aiName} (Cyrillic script).
 Translate this ${currentLangObj.aiName} word or phrase into French.
 Return ONLY a raw JSON object, no markdown, no extra text:
-{"frenchWord":"the French translation","translation":"${query.trim()}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence using the word","exampleTranslation":"translation of example in ${currentLangObj.aiName}","found":true,"suggestions":[]}`
+{"frenchWord":"the French translation","translation":"${query.trim()}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence using the word","exampleTranslation":"translation of example in ${currentLangObj.aiName}","found":true,"suggestions":[],"cefr":"A1|A2|B1|B2|C1|C2 — level of the French word"}`
         : `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
 If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
 
@@ -1763,9 +1850,13 @@ Collocations — the most valuable part for the learner:
 - Each item: {"phrase": "the French collocation", "translation": "its meaning in ${currentLangObj.aiName}"}.
 - Keep "frenchWord" (or its inflected form) inside every phrase. No full sentences, no punctuation at the end.
 
+CEFR level:
+- Set "cefr" to the CEFR level (A1, A2, B1, B2, C1 or C2) at which a French learner typically meets this word or phrase.
+- Judge the French side, by frequency and difficulty: everyday basics = A1/A2, abstract or formal = B2+, rare/literary/idiomatic = C1/C2.
+
 If the word has a typo or is misspelled (only for French words), set found:false and put 2-3 correct French spelling suggestions in "suggestions".
 If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
-{"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[],"collocations":[{"phrase":"...","translation":"..."}]}`;
+{"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[],"collocations":[{"phrase":"...","translation":"..."}],"cefr":"B1"}`;
 
       const response = await generateWithFallback({
         contents: prompt,
@@ -1809,11 +1900,12 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
           next_review_at: Date.now() + NEW_WORD_FIRST_DELAY, // learning step: first review in ~10 min
           status: 'new',
           review_count: 0,
-          collocations: freshCollocations.length > 0 ? freshCollocations : undefined
+          collocations: freshCollocations.length > 0 ? freshCollocations : undefined,
+          cefr: toCefr(result.cefr)
         };
 
         setWords(prev => {
-          const existingIdx = prev.findIndex(w => normalizeWord(w.word) === normalizedFinal);
+          const existingIdx = prev.findIndex(w => dedupeKey(w.word) === dedupeKey(finalWord));
           if (existingIdx !== -1) {
             // Update existing word with new language translation
             const updated = [...prev];
@@ -1830,6 +1922,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               example: result.example || updated[existingIdx].example,
               exampleTranslation: result.exampleTranslation || updated[existingIdx].exampleTranslation,
               collocations: freshCollocations.length > 0 ? freshCollocations : updated[existingIdx].collocations,
+              cefr: toCefr(result.cefr) ?? updated[existingIdx].cefr,
             };
             return updated;
           }
@@ -1912,6 +2005,225 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     } finally {
       setIsLoadingCollocations(false);
     }
+  };
+
+  const inCurrentLang = (w: Word) => targetLanguage === 'Russe'
+    ? (!w.target_lang || w.target_lang === 'Russe')
+    : w.target_lang === targetLanguage;
+
+  // ===== CEFR: classify words already in the base, 40 per AI call =====
+  const detectLevels = async () => {
+    if (isDetectingLevels) return;
+    const targets = words.filter(w => inCurrentLang(w) && !w.cefr);
+    if (targets.length === 0) {
+      alert('Tous les mots ont déjà un niveau.');
+      return;
+    }
+    setIsDetectingLevels(true);
+    setLevelProgress({ done: 0, total: targets.length });
+    const BATCH = 40;
+    let missed = 0;
+    for (let i = 0; i < targets.length; i += BATCH) {
+      const batch = targets.slice(i, i + BATCH);
+      try {
+        // Numbered list: the AI answers by number, so a respelled word can't break the mapping
+        const list = batch.map((w, idx) => `${idx + 1}. ${w.word}`).join('\n');
+        const response = await generateWithFallback({
+          contents: `Tu es un expert du CECRL (Cadre européen commun de référence pour les langues).
+Pour chaque mot ou expression français ci-dessous, donne le niveau auquel un apprenant le rencontre typiquement : A1, A2, B1, B2, C1 ou C2.
+Critères : fréquence d'usage et difficulté. Vocabulaire quotidien de base = A1/A2 ; abstrait ou soutenu = B2+ ; rare, littéraire ou idiomatique = C1/C2.
+
+${list}
+
+Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
+{"levels":[{"n":1,"level":"A1"},{"n":2,"level":"B2"}]}`,
+          config: {}
+        });
+        const result = JSON.parse(extractJson(response) || '{}');
+        const found: Record<string, CefrLevel> = {};
+        if (Array.isArray(result.levels)) {
+          for (const item of result.levels) {
+            const n = Number(item?.n);
+            const lv = toCefr(item?.level);
+            if (Number.isInteger(n) && n >= 1 && n <= batch.length && lv) found[batch[n - 1].id] = lv;
+          }
+        }
+        missed += batch.length - Object.keys(found).length;
+        setWords(prev => prev.map(w => (found[w.id] ? { ...w, cefr: found[w.id] } : w)));
+      } catch (e) {
+        console.error('CEFR detection error:', e);
+        missed += batch.length;
+      }
+      setLevelProgress({ done: Math.min(i + BATCH, targets.length), total: targets.length });
+    }
+    setIsDetectingLevels(false);
+    if (missed > 0) {
+      alert(`${missed} mot(s) n'ont pas pu être classés (service surchargé ou quota). Relancez plus tard : seuls les mots sans niveau seront traités.`);
+    }
+  };
+
+  // ===== Duplicate finder =====
+  type DupKind = 'exact' | 'verb' | 'near' | 'root';
+  const duplicateGroups = useMemo(() => {
+    if (!showDuplicates) return [] as { kind: DupKind; title: string; words: Word[] }[];
+    const pool = words.filter(inCurrentLang);
+    const groups: { kind: DupKind; title: string; words: Word[] }[] = [];
+    const seenPairs = new Set<string>();
+    const pairKey = (a: Word, b: Word) => (a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`);
+    const markAll = (ws: Word[]) => {
+      for (let i = 0; i < ws.length; i++) for (let j = i + 1; j < ws.length; j++) seenPairs.add(pairKey(ws[i], ws[j]));
+    };
+    const hasNewPair = (ws: Word[]) => {
+      for (let i = 0; i < ws.length; i++) for (let j = i + 1; j < ws.length; j++) if (!seenPairs.has(pairKey(ws[i], ws[j]))) return true;
+      return false;
+    };
+    const isPhrase = (w: Word) => stripArticles(w.word.trim()).includes(' ');
+    // Outside the exact-duplicate group, show one representative per spelling
+    const uniqByKey = (ws: Word[]) => {
+      const seenKeys = new Set<string>();
+      return ws.filter(w => {
+        const k = dedupeKey(w.word);
+        if (seenKeys.has(k)) return false;
+        seenKeys.add(k);
+        return true;
+      });
+    };
+
+    // 1. Exact duplicates — same word up to article, case and accents
+    const byKey = new Map<string, Word[]>();
+    pool.forEach(w => {
+      const k = dedupeKey(w.word);
+      if (k) byKey.set(k, [...(byKey.get(k) ?? []), w]);
+    });
+    byKey.forEach(ws => {
+      if (ws.length > 1) {
+        groups.push({ kind: 'exact', title: 'Doublons exacts', words: ws });
+        markAll(ws);
+      }
+    });
+
+    // 2. Several forms of the same verb (shared infinitive)
+    const byInf = new Map<string, Word[]>();
+    pool.forEach(w => {
+      if (!w.infinitive || isPhrase(w)) return;
+      const k = normalizeWord(w.infinitive);
+      if (k) byInf.set(k, [...(byInf.get(k) ?? []), w]);
+    });
+    byInf.forEach(ws => {
+      const shown = uniqByKey(ws);
+      if (shown.length > 1 && hasNewPair(ws)) {
+        groups.push({ kind: 'verb', title: `Formes du verbe « ${ws[0].infinitive} »`, words: shown });
+        markAll(ws);
+      }
+    });
+
+    // 3. Near-identical single words (typo, plural/feminine, one changed letter).
+    //    Conservative: short words may differ only by one trailing s/e/x.
+    const singles = pool
+      .filter(w => !isPhrase(w))
+      .map(w => ({ w, k: dedupeKey(w.word) }))
+      .filter(x => x.k.length >= 4);
+    const parent = new Map<string, string>();
+    const find = (id: string): string => {
+      let r = id;
+      while (parent.get(r) !== undefined && parent.get(r) !== r) r = parent.get(r)!;
+      return r;
+    };
+    const union = (a: string, b: string) => {
+      const ra = find(a), rb = find(b);
+      if (ra !== rb) parent.set(ra, rb);
+    };
+    singles.forEach(x => parent.set(x.w.id, x.w.id));
+    const byFirst = new Map<string, typeof singles>();
+    singles.forEach(x => byFirst.set(x.k[0], [...(byFirst.get(x.k[0]) ?? []), x]));
+    byFirst.forEach(bucket => {
+      for (let i = 0; i < bucket.length; i++) {
+        for (let j = i + 1; j < bucket.length; j++) {
+          const A = bucket[i], B = bucket[j];
+          if (A.k === B.k || seenPairs.has(pairKey(A.w, B.w))) continue;
+          const minLen = Math.min(A.k.length, B.k.length);
+          let near = false;
+          if (minLen <= 5) {
+            const [short, long] = A.k.length <= B.k.length ? [A.k, B.k] : [B.k, A.k];
+            near = long.length === short.length + 1 && long.startsWith(short) && /[sex]$/.test(long);
+          } else {
+            const max = minLen >= 9 ? 2 : 1;
+            near = levenshtein(A.k, B.k, max) <= max;
+          }
+          if (near) union(A.w.id, B.w.id);
+        }
+      }
+    });
+    const nearClusters = new Map<string, Word[]>();
+    singles.forEach(x => {
+      const r = find(x.w.id);
+      nearClusters.set(r, [...(nearClusters.get(r) ?? []), x.w]);
+    });
+    nearClusters.forEach(ws => {
+      const shown = uniqByKey(ws);
+      if (shown.length > 1 && hasNewPair(ws)) {
+        groups.push({ kind: 'near', title: 'Presque identiques', words: shown });
+        markAll(ws);
+      }
+    });
+
+    // 4. Same root (shared 6-letter stem) — a hint to review, not a verdict
+    const byStem = new Map<string, Word[]>();
+    singles.forEach(x => {
+      if (x.k.length < 6) return;
+      const stem = x.k.slice(0, 6);
+      byStem.set(stem, [...(byStem.get(stem) ?? []), x.w]);
+    });
+    byStem.forEach(ws => {
+      const shown = uniqByKey(ws);
+      if (shown.length > 1 && shown.length <= 8 && hasNewPair(ws)) {
+        groups.push({ kind: 'root', title: 'Même racine (à vérifier)', words: shown });
+        markAll(ws);
+      }
+    });
+
+    return groups;
+  }, [showDuplicates, words, targetLanguage]);
+
+  // Remove several words at once, keeping every place that holds copies consistent
+  const removeWordsById = (ids: Set<string>) => {
+    if (ids.size === 0) return;
+    setWords(prev => prev.filter(w => !ids.has(w.id)));
+    setExerciseBuckets(prev => ({
+      forgotten: prev.forgotten.filter(w => !ids.has(w.id)),
+      almost: prev.almost.filter(w => !ids.has(w.id)),
+      remembered: prev.remembered.filter(w => !ids.has(w.id)),
+    }));
+    setCurrentExerciseBatch(prev => prev.filter(w => !ids.has(w.id)));
+    if (isReviewing) {
+      const next = sessionQueue.filter(w => !ids.has(w.id));
+      if (next.length === 0) stopReview();
+      else {
+        setSessionQueue(next);
+        setCurrentReviewIndex(ci => Math.min(ci, next.length - 1));
+        setShowTranslation(false);
+        setCardCommit(null);
+      }
+    }
+  };
+
+  // Keep the entry with the most learning progress, delete the rest of an exact-duplicate group
+  const keepBestOf = (ws: Word[]) => {
+    const score = (w: Word) =>
+      (w.status === 'mastered' ? 1000 : 0) + (w.review_count ?? 0) * 10 + (w.last_reviewed_at ? 1 : 0);
+    const best = [...ws].sort((a, b) => (score(b) - score(a)) || (a.created_at - b.created_at))[0];
+    const drop = ws.filter(w => w.id !== best.id);
+    if (!window.confirm(`Garder « ${best.word} » (le plus avancé) et supprimer ${drop.length} doublon(s) ?`)) return;
+    // Don't lose cached context: merge collocations and a missing level into the survivor
+    const mergedColloc = [...(best.collocations ?? [])];
+    drop.forEach(w => (w.collocations ?? []).forEach(c => {
+      if (!mergedColloc.some(m => normalizeWord(m.phrase) === normalizeWord(c.phrase))) mergedColloc.push(c);
+    }));
+    const mergedLevel = best.cefr ?? drop.find(w => w.cefr)?.cefr;
+    setWords(prev => prev.map(w => (w.id === best.id
+      ? { ...w, collocations: mergedColloc.length ? mergedColloc : w.collocations, cefr: mergedLevel }
+      : w)));
+    removeWordsById(new Set(drop.map(w => w.id)));
   };
 
   // Words already in the base never trigger a translation call, so they would show no phrases
@@ -2059,7 +2371,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
 
       const response = await generateWithFallback({
         contents: `Extract French vocabulary from the following text: ${text.substring(0, 5000)}.
-        Identify word, translation in ${targetLanguage}, gender (m/f/none), isPlural, infinitive, and examples.
+        Identify word, translation in ${targetLanguage}, gender (m/f/none), isPlural, infinitive, examples, and cefr (the CEFR level A1/A2/B1/B2/C1/C2 of the French word).
         If a word is a verb, always fill "infinitive" (use the same word if it's already the infinitive) and "infinitiveTranslation". If it's not a verb, leave both empty.
         Respond ONLY with a JSON array of objects. No reasoning allowed.`,
         config: {}
@@ -2086,13 +2398,14 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
           created_at: Date.now(),
           next_review_at: Date.now() + NEW_WORD_FIRST_DELAY, // learning step: first review in ~10 min
           status: 'new',
-          review_count: 0
+          review_count: 0,
+          cefr: toCefr(item.cefr)
         }));
 
         setWords(prev => {
-          const existingNormalizedWords = new Set(prev.map(w => normalizeWord(w.word)));
+          const existingNormalizedWords = new Set(prev.map(w => dedupeKey(w.word)));
           const uniqueNewWords = newWords.filter(w => {
-            const norm = normalizeWord(w.word);
+            const norm = dedupeKey(w.word);
             if (existingNormalizedWords.has(norm)) return false;
             existingNormalizedWords.add(norm);
             return true;
@@ -2630,6 +2943,11 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                                   )}
                                 </>
                               )}
+                              {currentWord?.cefr && (
+                                <span title="Niveau CECRL" className={`px-2 py-0.5 rounded text-[10px] font-bold text-center ${CEFR_BADGE[currentWord.cefr]}`}>
+                                  {currentWord.cefr}
+                                </span>
+                              )}
                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase text-center ${
                                 currentWord?.status === 'mastered' ? 'bg-emerald-100 text-emerald-600' : 'bg-amber-100 text-amber-600'
                               }`}>
@@ -2921,6 +3239,11 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                         >
                           <Volume2 size={16} />
                         </button>
+                        {searchResult.cefr && (
+                          <span title="Niveau CECRL" className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${CEFR_BADGE[searchResult.cefr]}`}>
+                            {searchResult.cefr}
+                          </span>
+                        )}
                         {searchResult.gender && searchResult.gender !== 'none' && (
                           <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
                             searchResult.gender === 'm' ? 'bg-blue-100 text-blue-600' : 'bg-pink-100 text-pink-600'
@@ -3516,9 +3839,9 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                     <button
                       onClick={() => {
                         const esc = (s: string) => `"${(s || '').replace(/"/g, '""')}"`;
-                        const header = 'word;translation;gender;example;exampleTranslation;status;review_count';
+                        const header = 'word;translation;gender;example;exampleTranslation;status;review_count;cefr';
                         const rows = words.map(w =>
-                          [w.word, w.translation, w.gender || '', w.example || '', w.exampleTranslation || '', w.status, String(w.review_count ?? 0)].map(esc).join(';')
+                          [w.word, w.translation, w.gender || '', w.example || '', w.exampleTranslation || '', w.status, String(w.review_count ?? 0), w.cefr || ''].map(esc).join(';')
                         );
                         const csv = '﻿' + [header, ...rows].join('\r\n');
                         const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
@@ -3549,6 +3872,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                     onClick={() => {
                       setIsWordListModalOpen(false);
                       setWordListSearchQuery('');
+                      setShowDuplicates(false);
                     }} 
                     className="p-2 hover:bg-slate-100 rounded-full transition-colors"
                   >
@@ -3568,10 +3892,115 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                   />
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                 </div>
+                {(() => {
+                  const missing = words.filter(w => inCurrentLang(w) && !w.cefr).length;
+                  return (
+                    <div className="flex items-center gap-2 mt-3 flex-wrap">
+                      <button
+                        onClick={detectLevels}
+                        disabled={isDetectingLevels || missing === 0}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-sky-200 text-sky-700 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-sky-50 transition-colors disabled:opacity-60"
+                        title="Déterminer le niveau CECRL (A1–C2) des mots qui n'en ont pas"
+                      >
+                        {isDetectingLevels
+                          ? <><Loader2 size={13} className="animate-spin" /> Niveaux {levelProgress.done}/{levelProgress.total}</>
+                          : missing > 0
+                            ? <><Sparkles size={13} /> Déterminer le niveau ({missing})</>
+                            : <><CheckCircle2 size={13} /> Niveaux déterminés</>}
+                      </button>
+                      <button
+                        onClick={() => setShowDuplicates(v => !v)}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-colors border ${
+                          showDuplicates
+                            ? 'bg-amber-500 border-amber-500 text-white hover:bg-amber-600'
+                            : 'bg-white border-amber-200 text-amber-700 hover:bg-amber-50'
+                        }`}
+                        title="Trouver les doublons et les mots de même racine"
+                      >
+                        <Grid2X2 size={13} />
+                        {showDuplicates ? 'Retour à la liste' : 'Chercher les doublons'}
+                      </button>
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="flex-1 overflow-y-auto p-4 space-y-2">
-                {words
+                {showDuplicates && (
+                  <div className="space-y-3">
+                    {duplicateGroups.length === 0 ? (
+                      <div className="text-center py-12">
+                        <CheckCircle2 size={40} className="mx-auto text-emerald-300 mb-3" />
+                        <p className="text-sm font-medium text-slate-700">Aucun doublon trouvé</p>
+                        <p className="text-xs text-slate-400 mt-1">Votre bibliothèque est propre.</p>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="text-[11px] text-slate-500 leading-snug">
+                          {duplicateGroups.length} groupe(s) trouvé(s). Rien n'est supprimé automatiquement :
+                          vérifiez chaque groupe — les mots « de même racine » sont souvent des mots différents à garder.
+                        </p>
+                        {duplicateGroups.map((g, gi) => {
+                          const tone = g.kind === 'exact'
+                            ? 'border-red-200 bg-red-50/40'
+                            : g.kind === 'verb'
+                              ? 'border-purple-200 bg-purple-50/40'
+                              : g.kind === 'near'
+                                ? 'border-amber-200 bg-amber-50/40'
+                                : 'border-slate-200 bg-slate-50/60';
+                          const titleTone = g.kind === 'exact' ? 'text-red-600'
+                            : g.kind === 'verb' ? 'text-purple-600'
+                            : g.kind === 'near' ? 'text-amber-700' : 'text-slate-500';
+                          return (
+                            <div key={`${g.kind}-${gi}`} className={`border rounded-2xl p-3 space-y-2 ${tone}`}>
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <span className={`text-[10px] font-bold uppercase tracking-widest ${titleTone}`}>
+                                  {g.title} · {g.words.length}
+                                </span>
+                                {g.kind === 'exact' && (
+                                  <button
+                                    onClick={() => keepBestOf(g.words)}
+                                    className="px-2.5 py-1 bg-white border border-red-200 text-red-600 rounded-lg text-[9px] font-bold uppercase tracking-widest hover:bg-red-50 transition-colors"
+                                  >
+                                    Garder le plus avancé
+                                  </button>
+                                )}
+                              </div>
+                              {g.words.map(w => {
+                                const st = wordStage(w);
+                                return (
+                                  <div key={w.id} className="flex items-center justify-between gap-2 bg-white rounded-xl px-3 py-2 border border-white">
+                                    <div className="min-w-0">
+                                      <div className="flex items-center gap-1.5 flex-wrap">
+                                        <span className="font-bold text-sm text-slate-900 break-words">
+                                          {getWordWithArticle(w.word, w.gender, w.isPlural)}
+                                        </span>
+                                        {w.cefr && (<span title="Niveau CECRL" className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${CEFR_BADGE[w.cefr]}`}>{w.cefr}</span>)}
+                                        <span title={st.title} className={`text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0 ${st.cls}`}>
+                                          {st.label}
+                                        </span>
+                                      </div>
+                                      <p className="text-[11px] text-indigo-600 truncate">{w.translation}</p>
+                                    </div>
+                                    <button
+                                      onClick={(e) => handleDeleteWord(w.id, e)}
+                                      className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all shrink-0"
+                                      title="Supprimer"
+                                    >
+                                      <Trash2 size={15} />
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {!showDuplicates && words
                   .filter(w => {
                     const matchesSearch = w.word.toLowerCase().includes(wordListSearchQuery.toLowerCase()) || 
                                         w.translation.toLowerCase().includes(wordListSearchQuery.toLowerCase());
@@ -3614,6 +4043,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                                 {w.gender === 'm' ? 'm' : 'f'}
                               </span>
                             )}
+                            {w.cefr && (<span title="Niveau CECRL" className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${CEFR_BADGE[w.cefr]}`}>{w.cefr}</span>)}
                             {(() => {
                               const st = wordStage(w);
                               return (
@@ -3672,7 +4102,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
                     </div>
                   ))}
                 
-                {words.length > 0 && words.filter(w => {
+                {!showDuplicates && words.length > 0 && words.filter(w => {
                   const matchesSearch = w.word.toLowerCase().includes(wordListSearchQuery.toLowerCase()) || 
                                       w.translation.toLowerCase().includes(wordListSearchQuery.toLowerCase());
                   const matchesLang = targetLanguage === 'Russe' 

@@ -19,6 +19,11 @@ export interface Word {
   last_grade?: ReviewGrade;
   /** Common phrases built around this word, cached so they load once and show instantly. */
   collocations?: { phrase: string; translation: string }[];
+  /** CEFR difficulty of the word/phrase, A1 (easiest) → C2. Drives the order new cards are introduced. */
+  cefr?: CefrLevel;
 }
+
+export type CefrLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
+export const CEFR_LEVELS: CefrLevel[] = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
 
 export type ReviewGrade = 'remembered' | 'almost' | 'forgotten';
