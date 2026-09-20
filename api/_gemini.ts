@@ -48,6 +48,8 @@ function rateLimited(ip: string): boolean {
 export interface ProxyRequest {
   body: unknown;
   origin?: string;
+  /** Fallback for the rare browser that omits Origin on a same-origin POST. */
+  referer?: string;
   ip?: string;
 }
 
@@ -62,14 +64,27 @@ function fail(status: number, code: number, message: string): ProxyResponse {
   return { status, body: { error: { code, message, status } } };
 }
 
-export async function handleGeminiRequest({ body, origin, ip }: ProxyRequest): Promise<ProxyResponse> {
+/** The request must prove it comes from one of our pages. */
+function isTrustedCaller(origin?: string, referer?: string): boolean {
+  if (origin) return allowedOrigins.includes(origin);
+  // Browsers send Origin on cross-origin and (modern ones) on same-origin POST.
+  // Referer is only a fallback; a bare script sends neither, which is the point.
+  if (referer) {
+    return allowedOrigins.some(o => referer === o || referer.startsWith(o + '/'));
+  }
+  return false;
+}
+
+export async function handleGeminiRequest({ body, origin, referer, ip }: ProxyRequest): Promise<ProxyResponse> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     console.error("GEMINI_API_KEY не задан в окружении сервера");
     return fail(500, 500, "Service is not configured.");
   }
 
-  if (origin && !allowedOrigins.includes(origin)) {
+  // Without this, a script that simply omits the Origin header could use our key freely:
+  // the key never leaks, but the door to spending it was wide open.
+  if (!isTrustedCaller(origin, referer)) {
     return fail(403, 403, "Origin not allowed.");
   }
 

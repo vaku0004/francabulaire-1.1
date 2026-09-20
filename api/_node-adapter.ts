@@ -26,6 +26,7 @@ export async function serveGemini(
   const result = await handleGeminiRequest({
     body,
     origin: req.headers.origin,
+    referer: req.headers.referer,
     ip: ip || req.socket?.remoteAddress || undefined,
   });
 

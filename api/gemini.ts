@@ -13,6 +13,7 @@ export default async function handler(req: any, res: any) {
   const { status, body } = await handleGeminiRequest({
     body: req.body,
     origin: req.headers.origin as string | undefined,
+    referer: req.headers.referer as string | undefined,
     ip: ip || req.socket?.remoteAddress,
   });
 
