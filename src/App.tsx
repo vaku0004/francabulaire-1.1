@@ -118,11 +118,16 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
   return out;
 }
 
+// "si" + conditional ("si je pourrais", "s'il voudrait") is a classic error the lite models keep
+// making even when the prompt forbids it — so such suggestions are dropped here instead.
+const SI_CONDITIONAL = /(?:^|\s)(?:si\s+|s')(?:(?:je|tu|il|ils|elle|elles|on|nous|vous)\s+|j')(?:(?:ne|le|la|les|me|te|se|lui|leur|y|en)\s+|[nlmts]')*\S*(?:rais|rait|rions|riez|raient)\b/i;
+
 function parseCollocations(raw: unknown): Collocation[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((c: any) => c && typeof c.phrase === 'string' && c.phrase.trim() && typeof c.translation === 'string')
-    .map((c: any) => ({ phrase: c.phrase.trim(), translation: c.translation.trim(), cefr: toCefr(c.cefr) }));
+    .map((c: any) => ({ phrase: c.phrase.trim(), translation: c.translation.trim(), cefr: toCefr(c.cefr) }))
+    .filter(c => !SI_CONDITIONAL.test(c.phrase.replace(/’/g, "'")));
 }
 
 // A looked-up word is held back this long before entering the base: if the learner
