@@ -131,6 +131,13 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
 // making even when the prompt forbids it — so such suggestions are dropped here instead.
 const SI_CONDITIONAL = /(?:^|\s)(?:si\s+|s')(?:(?:je|tu|il|ils|elle|elles|on|nous|vous)\s+|j')(?:(?:ne|le|la|les|me|te|se|lui|leur|y|en)\s+|[nlmts]')*\S*(?:rais|rait|rions|riez|raient)\b/i;
 
+// Models sometimes write "null" or "none" as text instead of leaving a field empty,
+// which then shows up on the card as "Infinitif: null".
+function aiText(v: unknown): string {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return /^(null|none|undefined|n\/a|-)$/i.test(s) ? '' : s;
+}
+
 function parseCollocations(raw: unknown): Collocation[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -2051,10 +2058,10 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
           target_lang: targetLanguage,
           gender: result.gender as any,
           isPlural: result.isPlural,
-          infinitive: result.infinitive,
-          infinitiveTranslation: result.infinitiveTranslation,
-          example: result.example,
-          exampleTranslation: result.exampleTranslation,
+          infinitive: aiText(result.infinitive),
+          infinitiveTranslation: aiText(result.infinitiveTranslation),
+          example: aiText(result.example),
+          exampleTranslation: aiText(result.exampleTranslation),
           tags: 'Auto-added',
           created_at: Date.now(),
           next_review_at: Date.now() + NEW_WORD_FIRST_DELAY, // learning step: first review in ~10 min
@@ -2080,10 +2087,10 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               // let's keep progress for now as per user's "just option to choose another language"
               gender: result.gender as any || updated[existingIdx].gender,
               isPlural: result.isPlural ?? updated[existingIdx].isPlural,
-              infinitive: result.infinitive || updated[existingIdx].infinitive,
-              infinitiveTranslation: result.infinitiveTranslation || updated[existingIdx].infinitiveTranslation,
-              example: result.example || updated[existingIdx].example,
-              exampleTranslation: result.exampleTranslation || updated[existingIdx].exampleTranslation,
+              infinitive: aiText(result.infinitive) || updated[existingIdx].infinitive,
+              infinitiveTranslation: aiText(result.infinitiveTranslation) || updated[existingIdx].infinitiveTranslation,
+              example: aiText(result.example) || updated[existingIdx].example,
+              exampleTranslation: aiText(result.exampleTranslation) || updated[existingIdx].exampleTranslation,
               cefr: toCefr(result.cefr) ?? updated[existingIdx].cefr,
             };
             return updated;
@@ -2635,10 +2642,10 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
           translation: item.translation.trim(),
           gender: item.gender,
           isPlural: item.isPlural,
-          infinitive: item.infinitive?.trim(),
-          infinitiveTranslation: item.infinitiveTranslation?.trim(),
-          example: item.example?.trim() || '',
-          exampleTranslation: item.exampleTranslation?.trim() || '',
+          infinitive: aiText(item.infinitive),
+          infinitiveTranslation: aiText(item.infinitiveTranslation),
+          example: aiText(item.example),
+          exampleTranslation: aiText(item.exampleTranslation),
           target_lang: targetLanguage,
           tags: 'Imported',
           created_at: Date.now(),
