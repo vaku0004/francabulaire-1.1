@@ -66,15 +66,22 @@ type ExTier = 'forgotten' | 'almost' | 'remembered';
 type ExBuckets = Record<ExTier, Word[]>;
 const EMPTY_BUCKETS: ExBuckets = { forgotten: [], almost: [], remembered: [] };
 
-// Keep in sync with ALLOWED_MODELS in api/_gemini.ts — the proxy rejects
-// anything not on that list. Ordered by measured latency against a free-tier
-// key, not by version: the newer flash models are slower or flakier here, and
-// the search path gives up after 30s. gemini-3.5-flash-lite and
-// gemini-flash-latest were measured at 22-53s and left out for that reason.
+// Keep both lists in sync with ALLOWED_MODELS in api/_gemini.ts — the proxy rejects
+// anything not on it. Free-tier limits decide the split: the Flash models allow only
+// 20 requests a day each, so they are kept for exercises, where quality matters most.
 const FALLBACK_MODELS = [
   "gemini-3.1-flash-lite",
   "gemini-3.5-flash",
   "gemini-3.7-flash",
+  "gemma-4-26b-a4b-it",
+];
+
+// Short lookups (dictionary, phrases, CEFR). Measured on the dictionary prompt:
+// 3.5 Flash Lite 1.2-2s, 3.1 Flash Lite 4.5-10s (500/day each), Gemma 26B ~4s
+// with reasoning off (14,400/day, 16K tokens/min).
+const FAST_MODELS = [
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
   "gemma-4-26b-a4b-it",
 ];
 
@@ -185,9 +192,18 @@ const RETRYABLE_CODES = new Set([404, 429, 500, 503]);
 interface GenerateOptions {
   /** Start the next model in parallel if the current one hasn't answered by then. */
   hedgeAfterMs?: number;
-  /** Skip the model's hidden reasoning — for short lookups it only adds latency. */
+  /** Short lookup: use FAST_MODELS and skip hidden reasoning, which only adds latency. */
   fast?: boolean;
 }
+
+// How to switch reasoning off, per model — each family takes a different setting and
+// rejects the others with a 400. The Flash Lite models don't reason, so they get nothing.
+// Gemma otherwise spends ~1,900 tokens (~40s) reasoning for a ~160-token answer.
+const NO_THINKING: Record<string, object> = {
+  "gemini-3.5-flash": { thinkingBudget: 0 },
+  "gemini-3.7-flash": { thinkingBudget: 0 },
+  "gemma-4-26b-a4b-it": { thinkingLevel: "minimal" },
+};
 
 /**
  * Tries the models in order, but never waits on a single one for long: an overloaded
@@ -197,12 +213,13 @@ interface GenerateOptions {
  */
 function generateWithFallback(params: any, opts: GenerateOptions = {}): Promise<any> {
   const hedgeAfterMs = opts.hedgeAfterMs ?? 15000;
+  const models = opts.fast ? FAST_MODELS : FALLBACK_MODELS;
 
   const attempt = async (model: string, signal: AbortSignal) => {
-    // Gemma rejects thinkingConfig outright (400), so only Gemini models get it
-    const noThinking = opts.fast && model.startsWith('gemini');
+    const thinkingConfig = opts.fast ? NO_THINKING[model] : undefined;
+    const noThinking = !!thinkingConfig;
     const tuned = noThinking
-      ? { ...params, config: { ...(params.config ?? {}), thinkingConfig: { thinkingBudget: 0 } } }
+      ? { ...params, config: { ...(params.config ?? {}), thinkingConfig } }
       : params;
     try {
       return await generateContent({ ...tuned, model }, signal);
@@ -235,12 +252,12 @@ function generateWithFallback(params: any, opts: GenerateOptions = {}): Promise<
     const launch = () => {
       clearTimeout(hedgeTimer);
       if (settled) return;
-      if (stopLaunching || next >= FALLBACK_MODELS.length) {
+      if (stopLaunching || next >= models.length) {
         // Nothing left to start: fail only once every running attempt has failed too
         if (pending === 0) finish(() => reject(lastError));
         return;
       }
-      const model = FALLBACK_MODELS[next++];
+      const model = models[next++];
       const ctrl = new AbortController();
       controllers.push(ctrl);
       pending++;
@@ -1973,7 +1990,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
 Translate this ${currentLangObj.aiName} word or phrase into French.
 Return ONLY a raw JSON object, no markdown, no extra text:
 {"frenchWord":"the French translation","translation":"${query.trim()}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence using the word","exampleTranslation":"translation of example in ${currentLangObj.aiName}","found":true,"suggestions":[],"collocations":[{"phrase":"common 2-5 word French expression with frenchWord","translation":"its meaning in ${currentLangObj.aiName}","cefr":"B1"}],"cefr":"A1|A2|B1|B2|C1|C2 — level of the French word"}
-Give 4 collocations; each has its own CEFR level (judge the whole expression).`
+Give 4 collocations; each has its own CEFR level (judge the whole expression). Each must be grammatically correct French a native would actually use (never "si" + conditional).`
         : `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
 If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
 
@@ -1991,6 +2008,7 @@ Collocations — the most valuable part for the learner:
 - Prefer what a native actually says: fixed expressions, verb+noun pairs, common prepositions.
 - Each item: {"phrase": "the French collocation", "translation": "its meaning in ${currentLangObj.aiName}", "cefr": "CEFR level of the WHOLE expression (A1..C2) — often higher than the bare word"}.
 - Keep "frenchWord" (or its inflected form) inside every phrase. No full sentences, no punctuation at the end.
+- Every phrase must be correct French that a native would actually write. Check the grammar: never "si" + conditional ("si je pouvais", not "si je pourrais"), correct inversion ("pourriez-vous", not "pourrais vous"), no contradictory or empty combinations ("pas encore déjà").
 
 CEFR level:
 - Set "cefr" to the CEFR level (A1, A2, B1, B2, C1 or C2) at which a French learner typically meets this word or phrase.
@@ -2004,7 +2022,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
       const response = await generateWithFallback({
         contents: prompt,
         config: {}
-      }, { fast: true, hedgeAfterMs: 4000 });
+      }, { fast: true, hedgeAfterMs: 3000 });
       const result = JSON.parse(extractJson(response) || '{}');
 
       // A late but valid answer is better than a stale timeout message — accept it and clear the error
@@ -2124,6 +2142,7 @@ Règles :
 - 2 à 5 mots par expression, courtes et vraiment usuelles (ce qu'un natif dit réellement).
 - Le mot "${word.word}" (ou sa forme fléchie/conjuguée) doit figurer dans chaque expression.
 - Pas de phrase complète, pas de ponctuation finale.
+- Chaque expression doit être du français correct, tel qu'un natif l'écrirait : jamais « si » + conditionnel (« si je pouvais », pas « si je pourrais »), inversion correcte (« pourriez-vous »), pas de combinaison contradictoire ou vide (« pas encore déjà »).
 ${already.length > 0 ? `- N'utilise AUCUNE de ces expressions déjà proposées : ${already.join(' ; ')}` : ''}
 
 - "cefr" : niveau CECRL de l'expression ENTIÈRE (A1..C2), souvent plus élevé que celui du mot seul.
@@ -2131,7 +2150,7 @@ ${already.length > 0 ? `- N'utilise AUCUNE de ces expressions déjà proposées 
 Réponds UNIQUEMENT avec un JSON brut, sans markdown :
 {"collocations":[{"phrase":"...","translation":"sens en ${currentLangObj.aiName}","cefr":"B1"}]}`,
         config: {}
-      }, { fast: true, hedgeAfterMs: 6000 });
+      }, { fast: true, hedgeAfterMs: 4000 });
       const result = JSON.parse(extractJson(response) || '{}');
       if (!Array.isArray(result.collocations)) throw new Error('bad response');
       const seen = new Set([normalizeWord(word.word), ...already.map(p => normalizeWord(p))]);
