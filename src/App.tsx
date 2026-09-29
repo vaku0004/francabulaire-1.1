@@ -35,10 +35,11 @@ import {
   Keyboard,
   Edit2,
   BarChart3,
-  Zap
+  Zap,
+  Clock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Word, ReviewGrade, CefrLevel, CEFR_LEVELS } from './types';
+import { Word, ReviewGrade, CefrLevel, CEFR_LEVELS, Collocation } from './types';
 import { Type, ThinkingLevel } from "@google/genai";
 import { generateContent, describeGeminiError } from "./lib/gemini";
 import { auth, db, googleProvider } from './lib/firebase';
@@ -82,6 +83,53 @@ function toCefr(v: unknown): CefrLevel | undefined {
   const s = String(v ?? '').trim().toUpperCase();
   return (CEFR_LEVELS as string[]).includes(s) ? (s as CefrLevel) : undefined;
 }
+// Level of each French word or phrase, in the same order; undefined where the AI gave nothing usable.
+// Numbered list: the AI answers by number, so a respelled word can't break the mapping.
+async function classifyCefr(items: string[]): Promise<(CefrLevel | undefined)[]> {
+  const list = items.map((t, idx) => `${idx + 1}. ${t}`).join('\n');
+  const response = await generateWithFallback({
+    contents: `Tu es un expert du CECRL (Cadre européen commun de référence pour les langues).
+Pour chaque mot ou expression français ci-dessous, donne le niveau auquel un apprenant le rencontre typiquement : A1, A2, B1, B2, C1 ou C2.
+Critères : fréquence d'usage et difficulté. Vocabulaire quotidien de base = A1/A2 ; abstrait ou soutenu = B2+ ; rare, littéraire ou idiomatique = C1/C2.
+Pour une expression, juge l'expression entière, pas seulement son mot principal.
+
+${list}
+
+Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
+{"levels":[{"n":1,"level":"A1"},{"n":2,"level":"B2"}]}`,
+    config: {}
+  }, { fast: true, hedgeAfterMs: 8000 });
+  const result = JSON.parse(extractJson(response) || '{}');
+  const out: (CefrLevel | undefined)[] = items.map(() => undefined);
+  if (Array.isArray(result.levels)) {
+    for (const item of result.levels) {
+      const n = Number(item?.n);
+      const lv = toCefr(item?.level);
+      if (Number.isInteger(n) && n >= 1 && n <= items.length && lv) out[n - 1] = lv;
+    }
+  }
+  return out;
+}
+
+function parseCollocations(raw: unknown): Collocation[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((c: any) => c && typeof c.phrase === 'string' && c.phrase.trim() && typeof c.translation === 'string')
+    .map((c: any) => ({ phrase: c.phrase.trim(), translation: c.translation.trim(), cefr: toCefr(c.cefr) }));
+}
+
+// A looked-up word is held back this long before entering the base: if the learner
+// picks one of its phrases instead, the bare word is never saved.
+const DRAFT_DELAY_MS = 30 * 1000;
+const DRAFT_STORAGE_KEY = 'francabulaire_dict_draft';
+interface DictDraft {
+  word: Word;
+  query: string;
+  deadline: number;
+  state: 'pending' | 'skipped' | 'saved';
+  owner: string; // uid or 'local' — never commit someone else's draft after an account switch
+}
+
 // Unknown level sorts after C2, so already-classified words come first
 function cefrRank(w: Word): number {
   return w.cefr ? CEFR_LEVELS.indexOf(w.cefr) : CEFR_LEVELS.length;
@@ -127,24 +175,91 @@ function stableStringify(v: any): string {
   return JSON.stringify(v);
 }
 
-async function generateWithFallback(params: any): Promise<any> {
-  let lastError: any;
-  for (const model of FALLBACK_MODELS) {
+function geminiErrorCode(err: any): number | null {
+  try { return JSON.parse(err?.message)?.error?.code ?? null; } catch { return null; }
+}
+// 404 means the model was retired for this project — keep going,
+// otherwise one dead entry kills the rest of the chain.
+const RETRYABLE_CODES = new Set([404, 429, 500, 503]);
+
+interface GenerateOptions {
+  /** Start the next model in parallel if the current one hasn't answered by then. */
+  hedgeAfterMs?: number;
+  /** Skip the model's hidden reasoning — for short lookups it only adds latency. */
+  fast?: boolean;
+}
+
+/**
+ * Tries the models in order, but never waits on a single one for long: an overloaded
+ * model can sit on a request for 90s+ before answering 503. After `hedgeAfterMs` the next
+ * model is started alongside it, and the first valid answer wins (the rest are aborted).
+ * A retryable failure moves on immediately, as before.
+ */
+function generateWithFallback(params: any, opts: GenerateOptions = {}): Promise<any> {
+  const hedgeAfterMs = opts.hedgeAfterMs ?? 15000;
+
+  const attempt = async (model: string, signal: AbortSignal) => {
+    // Gemma rejects thinkingConfig outright (400), so only Gemini models get it
+    const noThinking = opts.fast && model.startsWith('gemini');
+    const tuned = noThinking
+      ? { ...params, config: { ...(params.config ?? {}), thinkingConfig: { thinkingBudget: 0 } } }
+      : params;
     try {
-      const response = await generateContent({ ...params, model });
-      return response;
-    } catch (err: any) {
-      const code = (() => { try { return JSON.parse(err.message)?.error?.code; } catch { return null; } })();
-      // 404 means the model was retired for this project — keep going,
-      // otherwise one dead entry kills the rest of the chain.
-      if (code === 404 || code === 429 || code === 503 || code === 500) {
-        lastError = err;
-        continue; // try next model
+      return await generateContent({ ...tuned, model }, signal);
+    } catch (err) {
+      // A model that doesn't accept the setting still deserves a plain try
+      if (noThinking && !signal.aborted && geminiErrorCode(err) === 400) {
+        return generateContent({ ...params, model }, signal);
       }
-      throw err; // other errors — stop immediately
+      throw err;
     }
-  }
-  throw lastError;
+  };
+
+  return new Promise((resolve, reject) => {
+    const controllers: AbortController[] = [];
+    let next = 0;
+    let pending = 0;
+    let settled = false;
+    let stopLaunching = false;
+    let lastError: any;
+    let hedgeTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = (done: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hedgeTimer);
+      controllers.forEach(c => c.abort());
+      done();
+    };
+
+    const launch = () => {
+      clearTimeout(hedgeTimer);
+      if (settled) return;
+      if (stopLaunching || next >= FALLBACK_MODELS.length) {
+        // Nothing left to start: fail only once every running attempt has failed too
+        if (pending === 0) finish(() => reject(lastError));
+        return;
+      }
+      const model = FALLBACK_MODELS[next++];
+      const ctrl = new AbortController();
+      controllers.push(ctrl);
+      pending++;
+      hedgeTimer = setTimeout(launch, hedgeAfterMs);
+      attempt(model, ctrl.signal).then(
+        res => { pending--; finish(() => resolve(res)); },
+        err => {
+          pending--;
+          if (settled) return;
+          lastError = err;
+          // Other errors (bad request, no network) won't be fixed by another model
+          if (!RETRYABLE_CODES.has(geminiErrorCode(err) as number)) stopLaunching = true;
+          launch();
+        }
+      );
+    };
+
+    launch();
+  });
 }
 
 function extractJson(response: any): string {
@@ -465,6 +580,16 @@ Règles importantes :
   // Duplicate finder view inside the word list
   const [showDuplicates, setShowDuplicates] = useState(false);
   const [savedCollocations, setSavedCollocations] = useState<Set<string>>(new Set());
+  // Freshly translated word waiting DRAFT_DELAY_MS before it is saved (survives a reload)
+  const [dictDraft, setDictDraft] = useState<DictDraft | null>(() => {
+    try {
+      const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+      const d = raw ? JSON.parse(raw) : null;
+      return d && d.state === 'pending' && d.word?.id ? d : null;
+    } catch { return null; }
+  });
+  const dictDraftRef = React.useRef<DictDraft | null>(dictDraft);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const pendingTranslations = React.useRef<Set<string>>(new Set());
   const lastFetchedQuery = React.useRef<string>('');
 
@@ -1787,9 +1912,14 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     );
     if (directMatch) return directMatch;
 
-    // 2. Try match on translation (Current language word)
-    const langMatch = words.find(w => 
-      w.translation.toLowerCase().includes(q) && 
+    // 2. Try match on translation (Current language word). Compare whole meanings,
+    //    ignoring case and accents (ё = е): "кот" must not open the entry for "который".
+    const meanings = (t: string) => t
+      .split(/[,;/]/)
+      .map(part => normalizeWord(part.replace(/\([^)]*\)/g, '')))
+      .filter(Boolean);
+    const langMatch = words.find(w =>
+      meanings(w.translation).includes(normalizedQuery) &&
       (w.target_lang === targetLanguage || (!w.target_lang && targetLanguage === 'Russe'))
     );
     if (langMatch) return langMatch;
@@ -1800,6 +1930,16 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
 
     return null;
   }, [searchQuery, words, targetLanguage]);
+
+  // What the dictionary shows: a word from the base, or the one just translated and not saved yet
+  const draftForQuery = dictDraft && normalizeWord(dictDraft.query) === normalizeWord(searchQuery.trim())
+    ? dictDraft : null;
+  const shownResult: Word | null = searchResult
+    ?? (draftForQuery?.state === 'saved'
+      ? words.find(w => w.id === draftForQuery.word.id) ?? null
+      : draftForQuery?.word ?? null);
+  const shownDraft = shownResult && draftForQuery && draftForQuery.state !== 'saved'
+    && shownResult.id === draftForQuery.word.id ? draftForQuery : null;
 
   // Fetch translation and save automatically
   const fetchTranslation = useCallback(async (query: string) => {
@@ -1817,6 +1957,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     // A slow/overloaded service must NOT be reported as "word not found" — that sends the
     // learner hunting for a dictionary problem that doesn't exist.
     let timedOut = false;
+    let retryWith: string | undefined;
     const timeoutId = setTimeout(() => {
       timedOut = true;
       setIsSearching(false);
@@ -1831,7 +1972,8 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
         ? `The user typed "${query.trim()}" in ${currentLangObj.aiName} (Cyrillic script).
 Translate this ${currentLangObj.aiName} word or phrase into French.
 Return ONLY a raw JSON object, no markdown, no extra text:
-{"frenchWord":"the French translation","translation":"${query.trim()}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence using the word","exampleTranslation":"translation of example in ${currentLangObj.aiName}","found":true,"suggestions":[],"cefr":"A1|A2|B1|B2|C1|C2 — level of the French word"}`
+{"frenchWord":"the French translation","translation":"${query.trim()}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence using the word","exampleTranslation":"translation of example in ${currentLangObj.aiName}","found":true,"suggestions":[],"collocations":[{"phrase":"common 2-5 word French expression with frenchWord","translation":"its meaning in ${currentLangObj.aiName}","cefr":"B1"}],"cefr":"A1|A2|B1|B2|C1|C2 — level of the French word"}
+Give 4 collocations; each has its own CEFR level (judge the whole expression).`
         : `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
 If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
 
@@ -1847,21 +1989,22 @@ Part of speech:
 Collocations — the most valuable part for the learner:
 - Fill "collocations" with 4 SHORT, genuinely common French expressions built around "frenchWord" (2-5 words each).
 - Prefer what a native actually says: fixed expressions, verb+noun pairs, common prepositions.
-- Each item: {"phrase": "the French collocation", "translation": "its meaning in ${currentLangObj.aiName}"}.
+- Each item: {"phrase": "the French collocation", "translation": "its meaning in ${currentLangObj.aiName}", "cefr": "CEFR level of the WHOLE expression (A1..C2) — often higher than the bare word"}.
 - Keep "frenchWord" (or its inflected form) inside every phrase. No full sentences, no punctuation at the end.
 
 CEFR level:
 - Set "cefr" to the CEFR level (A1, A2, B1, B2, C1 or C2) at which a French learner typically meets this word or phrase.
 - Judge the French side, by frequency and difficulty: everyday basics = A1/A2, abstract or formal = B2+, rare/literary/idiomatic = C1/C2.
 
-If the word has a typo or is misspelled (only for French words), set found:false and put 2-3 correct French spelling suggestions in "suggestions".
+Capitalization and accents NEVER make a word "not found": "etre", "Ecole", "francais", "deja", "a cote" are the same as "être", "école", "français", "déjà", "à côté". Silently restore the correct spelling (accents, lowercase unless it is a proper noun) in "frenchWord" and set found:true.
+Only a real misspelling (wrong, missing or extra letters) of a French word gets found:false with 2-3 correct French spelling suggestions in "suggestions".
 If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
-{"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[],"collocations":[{"phrase":"...","translation":"..."}],"cefr":"B1"}`;
+{"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[],"collocations":[{"phrase":"...","translation":"...","cefr":"B1"}],"cefr":"B1"}`;
 
       const response = await generateWithFallback({
         contents: prompt,
         config: {}
-      });
+      }, { fast: true, hedgeAfterMs: 4000 });
       const result = JSON.parse(extractJson(response) || '{}');
 
       // A late but valid answer is better than a stale timeout message — accept it and clear the error
@@ -1876,13 +2019,9 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
         const normalizedFinal = normalizeWord(finalWord);
 
         // Collocations come free with the same call — cached on the word so they show instantly next time
-        const freshCollocations: { phrase: string; translation: string }[] = Array.isArray(result.collocations)
-          ? result.collocations
-              .filter((c: any) => c && typeof c.phrase === 'string' && c.phrase.trim() && typeof c.translation === 'string')
-              .map((c: any) => ({ phrase: c.phrase.trim(), translation: c.translation.trim() }))
-              .filter((c: { phrase: string }) => normalizeWord(c.phrase) !== normalizedFinal)
-              .slice(0, 6)
-          : [];
+        const freshCollocations = parseCollocations(result.collocations)
+          .filter(c => normalizeWord(c.phrase) !== normalizedFinal)
+          .slice(0, 6);
 
         const newWord: Word = {
           id: crypto.randomUUID(),
@@ -1904,7 +2043,11 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
           cefr: toCefr(result.cefr)
         };
 
-        setWords(prev => {
+        // Already in the base: refresh that entry. Otherwise hold the new word back —
+        // if the learner picks one of its phrases, the bare word never enters the base.
+        if (!words.some(w => dedupeKey(w.word) === dedupeKey(finalWord))) {
+          stageDraft(newWord, trimmedQuery);
+        } else setWords(prev => {
           const existingIdx = prev.findIndex(w => dedupeKey(w.word) === dedupeKey(finalWord));
           if (existingIdx !== -1) {
             // Update existing word with new language translation
@@ -1926,12 +2069,16 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
             };
             return updated;
           }
-          return [...prev, newWord];
+          return prev;
         });
         
         if (result.suggestions && result.suggestions.length > 0) {
           setSuggestions(result.suggestions);
         }
+      } else if (result.found === false && Array.isArray(result.suggestions)
+        && result.suggestions.some((sug: unknown) => typeof sug === 'string' && normalizeWord(sug) === normalizedQuery)) {
+        // Only the accents or capitals differed ("etre" → "être") — that is not a typo: look it up directly
+        retryWith = result.suggestions.find((sug: unknown) => typeof sug === 'string' && normalizeWord(sug) === normalizedQuery);
       } else if (result.found === false && Array.isArray(result.suggestions) && result.suggestions.length > 0) {
         setSuggestions(result.suggestions);
         setError(`Le mot "${trimmedQuery}" n'a pas été trouvé. Vouliez-vous dire :`);
@@ -1955,13 +2102,14 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
       clearTimeout(timeoutId);
       setIsSearching(false);
     }
-  }, [targetLanguage, currentLangObj.aiName, words, normalizeWord]);
+    if (retryWith) fetchTranslation(retryWith);
+  }, [targetLanguage, currentLangObj.aiName, words, normalizeWord, user]);
 
   const triggerSearch = useCallback(() => {
-    if (searchQuery.trim().length >= 2 && !searchResult) {
+    if (searchQuery.trim().length >= 2 && !shownResult) {
       fetchTranslation(searchQuery);
     }
-  }, [searchQuery, searchResult, fetchTranslation]);
+  }, [searchQuery, shownResult, fetchTranslation]);
 
   // Load (or extend) the list of collocations for the word currently shown in the dictionary
   const fetchCollocations = async (word: Word) => {
@@ -1978,17 +2126,17 @@ Règles :
 - Pas de phrase complète, pas de ponctuation finale.
 ${already.length > 0 ? `- N'utilise AUCUNE de ces expressions déjà proposées : ${already.join(' ; ')}` : ''}
 
+- "cefr" : niveau CECRL de l'expression ENTIÈRE (A1..C2), souvent plus élevé que celui du mot seul.
+
 Réponds UNIQUEMENT avec un JSON brut, sans markdown :
-{"collocations":[{"phrase":"...","translation":"sens en ${currentLangObj.aiName}"}]}`,
+{"collocations":[{"phrase":"...","translation":"sens en ${currentLangObj.aiName}","cefr":"B1"}]}`,
         config: {}
-      });
+      }, { fast: true, hedgeAfterMs: 6000 });
       const result = JSON.parse(extractJson(response) || '{}');
       if (!Array.isArray(result.collocations)) throw new Error('bad response');
       const seen = new Set([normalizeWord(word.word), ...already.map(p => normalizeWord(p))]);
-      const fresh = result.collocations
-        .filter((c: any) => c && typeof c.phrase === 'string' && c.phrase.trim() && typeof c.translation === 'string')
-        .map((c: any) => ({ phrase: c.phrase.trim(), translation: c.translation.trim() }))
-        .filter((c: { phrase: string }) => {
+      const fresh = parseCollocations(result.collocations)
+        .filter(c => {
           const k = normalizeWord(c.phrase);
           if (seen.has(k)) return false;
           seen.add(k);
@@ -1996,9 +2144,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
         });
       if (fresh.length === 0) throw new Error('no new collocations');
       // Cache on the word itself: fetched once, then shown instantly and offline
-      setWords(prev => prev.map(w =>
-        w.id === word.id ? { ...w, collocations: [...(w.collocations ?? []), ...fresh] } : w
-      ));
+      patchWord(word.id, w => ({ ...w, collocations: [...(w.collocations ?? []), ...fresh] }));
     } catch (e) {
       console.error('Collocations error:', e);
       alert(describeGeminiError(e, "Impossible de charger les expressions. Réessayez."));
@@ -2026,28 +2172,12 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     for (let i = 0; i < targets.length; i += BATCH) {
       const batch = targets.slice(i, i + BATCH);
       try {
-        // Numbered list: the AI answers by number, so a respelled word can't break the mapping
-        const list = batch.map((w, idx) => `${idx + 1}. ${w.word}`).join('\n');
-        const response = await generateWithFallback({
-          contents: `Tu es un expert du CECRL (Cadre européen commun de référence pour les langues).
-Pour chaque mot ou expression français ci-dessous, donne le niveau auquel un apprenant le rencontre typiquement : A1, A2, B1, B2, C1 ou C2.
-Critères : fréquence d'usage et difficulté. Vocabulaire quotidien de base = A1/A2 ; abstrait ou soutenu = B2+ ; rare, littéraire ou idiomatique = C1/C2.
-
-${list}
-
-Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
-{"levels":[{"n":1,"level":"A1"},{"n":2,"level":"B2"}]}`,
-          config: {}
-        });
-        const result = JSON.parse(extractJson(response) || '{}');
+        const levels = await classifyCefr(batch.map(w => w.word));
         const found: Record<string, CefrLevel> = {};
-        if (Array.isArray(result.levels)) {
-          for (const item of result.levels) {
-            const n = Number(item?.n);
-            const lv = toCefr(item?.level);
-            if (Number.isInteger(n) && n >= 1 && n <= batch.length && lv) found[batch[n - 1].id] = lv;
-          }
-        }
+        batch.forEach((w, idx) => {
+          const lv = levels[idx];
+          if (lv) found[w.id] = lv;
+        });
         missed += batch.length - Object.keys(found).length;
         setWords(prev => prev.map(w => (found[w.id] ? { ...w, cefr: found[w.id] } : w)));
       } catch (e) {
@@ -2230,21 +2360,22 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
   // until the learner clicked. Fetch them once, automatically, the first time the word is displayed.
   const autoCollocationTried = React.useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!searchResult || isSearching || isLoadingCollocations) return;
-    if (searchResult.collocations && searchResult.collocations.length > 0) return;
-    if (autoCollocationTried.current.has(searchResult.id)) return;
-    autoCollocationTried.current.add(searchResult.id);
-    fetchCollocations(searchResult);
-  }, [searchResult, isSearching]);
+    if (!shownResult || isSearching || isLoadingCollocations) return;
+    if (shownResult.collocations && shownResult.collocations.length > 0) return;
+    if (autoCollocationTried.current.has(shownResult.id)) return;
+    autoCollocationTried.current.add(shownResult.id);
+    fetchCollocations(shownResult);
+  }, [shownResult, isSearching]);
 
   // Save a collocation as its own entry — this is the "learn in context" path:
   // the phrase enters the base, not just the bare word
-  const saveCollocation = (c: { phrase: string; translation: string }, source: Word) => {
+  const saveCollocation = (c: Collocation, source: Word) => {
     const normalizedPhrase = normalizeWord(c.phrase);
+    const id = crypto.randomUUID();
     setWords(prev => {
       if (prev.some(w => normalizeWord(w.word) === normalizedPhrase)) return prev;
       const entry: Word = {
-        id: crypto.randomUUID(),
+        id,
         word: c.phrase,
         translation: c.translation,
         target_lang: targetLanguage,
@@ -2259,14 +2390,106 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
         next_review_at: Date.now() + NEW_WORD_FIRST_DELAY,
         status: 'new',
         review_count: 0,
+        cefr: c.cefr,
       };
       return [...prev, entry];
     });
     setSavedCollocations(prev => new Set(prev).add(normalizedPhrase));
+    // The learner chose the phrase: the bare word it came from stays out of the base
+    setDictDraft(d => (d && d.word.id === source.id && d.state === 'pending' ? { ...d, state: 'skipped' } : d));
+    // Phrase cached before levels existed: classify it in the background
+    if (!c.cefr) {
+      classifyCefr([c.phrase])
+        .then(([lv]) => { if (lv) setWords(prev => prev.map(w => (w.id === id ? { ...w, cefr: lv } : w))); })
+        .catch(e => console.error('CEFR detection error:', e));
+    }
     speak(c.phrase);
   };
 
-  // Auto-search with 2s debounce after user stops typing
+  // ===== Dictionary draft: the looked-up word enters the base only if no phrase was picked =====
+  const commitDraftWord = (w: Word) => {
+    const now = Date.now();
+    setWords(prev => (prev.some(x => dedupeKey(x.word) === dedupeKey(w.word))
+      ? prev
+      : [...prev, { ...w, created_at: now, next_review_at: now + NEW_WORD_FIRST_DELAY }]));
+  };
+
+  function stageDraft(word: Word, query: string) {
+    const prev = dictDraftRef.current;
+    if (prev && prev.state === 'pending' && prev.word.id !== word.id) {
+      // Still typing ("lanc" → "lancer") or narrowing to a phrase ("lancer" → "lancer la balle"):
+      // the earlier lookup was a step on the way, drop it. Anything else was a real lookup — keep it.
+      const a = normalizeWord(prev.query), b = normalizeWord(query);
+      if (!(a.startsWith(b) || b.startsWith(a))) commitDraftWord(prev.word);
+    }
+    setNowTick(Date.now());
+    setDictDraft({ word, query, deadline: Date.now() + DRAFT_DELAY_MS, state: 'pending', owner: user?.uid ?? 'local' });
+  }
+
+  const addDraftNow = () => {
+    const d = dictDraftRef.current;
+    if (!d) return;
+    commitDraftWord(d.word);
+    setDictDraft({ ...d, state: 'saved' });
+  };
+  const skipDraft = () => setDictDraft(d => (d ? { ...d, state: 'skipped' } : d));
+
+  // Update a word wherever it lives — in the base or in the pending draft
+  const patchWord = (id: string, fn: (w: Word) => Word) => {
+    setWords(prev => prev.map(w => (w.id === id ? fn(w) : w)));
+    setDictDraft(d => (d && d.word.id === id ? { ...d, word: fn(d.word) } : d));
+  };
+
+  useEffect(() => {
+    dictDraftRef.current = dictDraft;
+    try {
+      if (dictDraft?.state === 'pending') localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(dictDraft));
+      else localStorage.removeItem(DRAFT_STORAGE_KEY);
+    } catch { /* storage unavailable: the draft just won't survive a reload */ }
+  }, [dictDraft]);
+
+  // Commit when the delay runs out — only once the base has loaded, so a draft restored after a
+  // reload can never be written over a base that isn't there yet
+  useEffect(() => {
+    if (!dictDraft || dictDraft.state !== 'pending') return;
+    if (!hasLoaded || syncError) return;
+    if (dictDraft.owner !== (user?.uid ?? 'local')) {
+      setDictDraft(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      commitDraftWord(dictDraft.word);
+      setDictDraft(d => (d && d.word.id === dictDraft.word.id ? { ...d, state: 'saved' } : d));
+    }, Math.max(0, dictDraft.deadline - Date.now()));
+    return () => clearTimeout(t);
+  }, [dictDraft, hasLoaded, syncError, user]);
+
+  // Countdown shown on the draft
+  useEffect(() => {
+    if (dictDraft?.state !== 'pending') return;
+    const i = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(i);
+  }, [dictDraft?.state]);
+
+  // Phrases cached before they carried a level: classify them once, in one call
+  const collocationLevelsTried = React.useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const w = shownResult;
+    const missing = (w?.collocations ?? []).filter(c => !c.cefr);
+    if (!w || missing.length === 0 || collocationLevelsTried.current.has(w.id)) return;
+    collocationLevelsTried.current.add(w.id);
+    classifyCefr(missing.map(c => c.phrase))
+      .then(levels => {
+        const byPhrase = new Map(missing.map((c, i) => [c.phrase, levels[i]]));
+        patchWord(w.id, x => ({
+          ...x,
+          collocations: (x.collocations ?? []).map(c => (c.cefr ? c : { ...c, cefr: byPhrase.get(c.phrase) })),
+        }));
+      })
+      .catch(e => console.error('CEFR detection error:', e));
+  }, [shownResult?.id, shownResult?.collocations]);
+
+  // Auto-search shortly after the user stops typing (Enter searches immediately)
   useEffect(() => {
     if (!searchQuery) {
       lastFetchedQuery.current = '';
@@ -2275,15 +2498,15 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
       setSuggestions([]);
       return;
     }
-    if (searchResult) {
+    if (shownResult) {
       setIsSearching(false);
       return;
     }
     const timer = setTimeout(() => {
       fetchTranslation(searchQuery);
-    }, 2000);
+    }, 1200);
     return () => clearTimeout(timer);
-  }, [searchQuery, searchResult, fetchTranslation]);
+  }, [searchQuery, shownResult, fetchTranslation]);
 
   // Auto-start review if words are due, or refresh if language changes
   useEffect(() => {
@@ -3218,7 +3441,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
               </div>
 
               <AnimatePresence mode="wait">
-                {searchResult ? (
+                {shownResult ? (
                   <motion.div 
                     key="result"
                     initial={{ opacity: 0, y: 5 }}
@@ -3226,91 +3449,134 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
                     exit={{ opacity: 0, y: -5 }}
                     className="p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100 space-y-3"
                   >
+                    {shownDraft && (
+                      <div className="flex items-center justify-between gap-2 flex-wrap px-3 py-2 rounded-xl bg-white border border-indigo-100">
+                        {shownDraft.state === 'pending' ? (
+                          <>
+                            <span className="text-[10px] text-slate-500 leading-snug flex items-center gap-1.5 min-w-0">
+                              <Clock size={12} className="text-indigo-400 shrink-0" />
+                              <span>
+                                Ajouté à la base dans <b className="text-indigo-600 tabular-nums">{Math.max(0, Math.ceil((shownDraft.deadline - nowTick) / 1000))} s</b>
+                                {(shownResult.collocations?.length ?? 0) > 0 && ' — ou choisissez une expression ci-dessous'}
+                              </span>
+                            </span>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                onClick={addDraftNow}
+                                className="px-2.5 py-1 bg-indigo-600 text-white rounded-lg text-[9px] font-bold uppercase tracking-widest hover:bg-indigo-700 transition-colors"
+                              >
+                                Ajouter
+                              </button>
+                              <button
+                                onClick={skipDraft}
+                                className="px-2.5 py-1 bg-white border border-slate-200 text-slate-500 rounded-lg text-[9px] font-bold uppercase tracking-widest hover:bg-slate-50 transition-colors"
+                              >
+                                Ne pas ajouter
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <span className="text-[10px] text-slate-500 leading-snug">Le mot seul n'est pas ajouté à la base.</span>
+                            <button
+                              onClick={addDraftNow}
+                              className="px-2.5 py-1 bg-white border border-indigo-200 text-indigo-600 rounded-lg text-[9px] font-bold uppercase tracking-widest hover:bg-indigo-50 transition-colors shrink-0"
+                            >
+                              Ajouter quand même
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
                     <div className="space-y-2">
                       <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-widest leading-none">Français</p>
                       <h4 className="text-xl sm:text-2xl font-bold text-slate-900 break-words">
-                        {getWordWithArticle(searchResult.word, searchResult.gender, searchResult.isPlural)}
+                        {getWordWithArticle(shownResult.word, shownResult.gender, shownResult.isPlural)}
                       </h4>
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <button
-                          onClick={() => speak(searchResult.word)}
+                          onClick={() => speak(shownResult.word)}
                           className="p-1 px-1.5 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition-colors"
                           title="Écouter"
                         >
                           <Volume2 size={16} />
                         </button>
-                        {searchResult.cefr && (
-                          <span title="Niveau CECRL" className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${CEFR_BADGE[searchResult.cefr]}`}>
-                            {searchResult.cefr}
+                        {shownResult.cefr && (
+                          <span title="Niveau CECRL" className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${CEFR_BADGE[shownResult.cefr]}`}>
+                            {shownResult.cefr}
                           </span>
                         )}
-                        {searchResult.gender && searchResult.gender !== 'none' && (
+                        {shownResult.gender && shownResult.gender !== 'none' && (
                           <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
-                            searchResult.gender === 'm' ? 'bg-blue-100 text-blue-600' : 'bg-pink-100 text-pink-600'
+                            shownResult.gender === 'm' ? 'bg-blue-100 text-blue-600' : 'bg-pink-100 text-pink-600'
                           }`}>
-                            {searchResult.gender === 'm' ? 'm' : 'f'}
+                            {shownResult.gender === 'm' ? 'm' : 'f'}
                           </span>
                         )}
-                        {searchResult.infinitive && (
+                        {shownResult.infinitive && (
                           <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-purple-100 text-purple-600">
                             v
                           </span>
                         )}
-                        <button
-                          onClick={() => {
-                            setWordListSearchQuery(searchResult.word);
-                            setIsWordListModalOpen(true);
-                          }}
-                          className="px-1.5 py-1 bg-white border border-indigo-100 rounded-lg text-[9px] font-bold text-indigo-600 uppercase hover:bg-indigo-50 transition-colors"
-                        >
-                          En base
-                        </button>
-                        <button
-                          onClick={() => setEditingWord(searchResult)}
-                          className="p-1.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-all"
-                          title="Modifier"
-                        >
-                          <Edit2 size={16} />
-                        </button>
-                        <button
-                          onClick={(e) => handleDeleteWord(searchResult.id, e)}
-                          className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                          title="Supprimer"
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                        {!shownDraft && (
+                          <>
+                            <button
+                              onClick={() => {
+                                setWordListSearchQuery(shownResult.word);
+                                setIsWordListModalOpen(true);
+                              }}
+                              className="px-1.5 py-1 bg-white border border-indigo-100 rounded-lg text-[9px] font-bold text-indigo-600 uppercase hover:bg-indigo-50 transition-colors"
+                            >
+                              En base
+                            </button>
+                            <button
+                              onClick={() => setEditingWord(shownResult)}
+                              className="p-1.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-all"
+                              title="Modifier"
+                            >
+                              <Edit2 size={16} />
+                            </button>
+                            <button
+                              onClick={(e) => handleDeleteWord(shownResult.id, e)}
+                              className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                              title="Supprimer"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                     <div>
                         <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-widest">{currentLangObj.name}</p>
-                        <p className="text-lg font-semibold text-indigo-600">{searchResult.translation}</p>
-                      {searchResult.infinitive && normalizeWord(searchResult.infinitive) !== normalizeWord(searchResult.word) && (
+                        <p className="text-lg font-semibold text-indigo-600">{shownResult.translation}</p>
+                      {shownResult.infinitive && normalizeWord(shownResult.infinitive) !== normalizeWord(shownResult.word) && (
                         <p className="text-xs font-medium text-indigo-500 mt-1">
-                          Infinitif: {searchResult.infinitive}
-                          {searchResult.infinitiveTranslation && (
+                          Infinitif: {shownResult.infinitive}
+                          {shownResult.infinitiveTranslation && (
                             <span className="text-indigo-400/70 font-normal italic ml-1">
-                              ({searchResult.infinitiveTranslation})
+                              ({shownResult.infinitiveTranslation})
                             </span>
                           )}
                         </p>
                       )}
                     </div>
-                    {searchResult.example && (
+                    {shownResult.example && (
                       <div>
                         <p className="text-[10px] font-bold uppercase text-indigo-400 tracking-widest">Exemple</p>
                         <p className="text-sm text-slate-600 italic leading-relaxed inline-flex items-start gap-1.5">
-                          <span>{cleanExample(searchResult.example)}</span>
+                          <span>{cleanExample(shownResult.example)}</span>
                           <button
-                            onClick={() => speak(cleanExample(searchResult.example))}
+                            onClick={() => speak(cleanExample(shownResult.example))}
                             className="p-0.5 text-indigo-300 hover:text-indigo-600 transition-colors shrink-0"
                             title="Écouter la phrase"
                           >
                             <Volume2 size={14} />
                           </button>
                         </p>
-                        {getExampleTranslation(searchResult) && (
+                        {getExampleTranslation(shownResult) && (
                           <p className="text-[10px] text-slate-400 italic mt-1">
-                            ({getExampleTranslation(searchResult)})
+                            ({getExampleTranslation(shownResult)})
                           </p>
                         )}
                       </div>
@@ -3322,26 +3588,26 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
                           En contexte
                         </p>
                         <button
-                          onClick={() => fetchCollocations(searchResult)}
+                          onClick={() => fetchCollocations(shownResult)}
                           disabled={isLoadingCollocations}
                           className="text-[9px] font-bold uppercase tracking-widest text-indigo-400 hover:text-indigo-600 transition-colors flex items-center gap-1 disabled:opacity-50"
                         >
                           {isLoadingCollocations
                             ? <><Loader2 size={11} className="animate-spin" /> Chargement</>
-                            : <><Sparkles size={11} /> {(searchResult.collocations?.length ?? 0) > 0 ? "Plus d'exemples" : 'Voir les expressions'}</>}
+                            : <><Sparkles size={11} /> {(shownResult.collocations?.length ?? 0) > 0 ? "Plus d'exemples" : 'Voir les expressions'}</>}
                         </button>
                       </div>
 
-                      {(searchResult.collocations?.length ?? 0) > 0 ? (
+                      {(shownResult.collocations?.length ?? 0) > 0 ? (
                         <>
                           <div className="space-y-1.5">
-                            {(searchResult.collocations ?? []).map((c) => {
+                            {(shownResult.collocations ?? []).map((c) => {
                               const saved = savedCollocations.has(normalizeWord(c.phrase))
                                 || words.some(w => normalizeWord(w.word) === normalizeWord(c.phrase));
                               return (
                                 <button
                                   key={c.phrase}
-                                  onClick={() => !saved && saveCollocation(c, searchResult)}
+                                  onClick={() => !saved && saveCollocation(c, shownResult)}
                                   disabled={saved}
                                   className={`w-full text-left px-3 py-2 rounded-xl border transition-all ${
                                     saved
@@ -3353,6 +3619,11 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
                                     <div className="min-w-0">
                                       <p className={`text-sm font-bold break-words ${saved ? 'text-emerald-700' : 'text-slate-800'}`}>
                                         {c.phrase}
+                                        {c.cefr && (
+                                          <span title="Niveau CECRL de l'expression" className={`ml-1.5 align-middle px-1.5 py-0.5 rounded text-[8px] font-bold ${CEFR_BADGE[c.cefr]}`}>
+                                            {c.cefr}
+                                          </span>
+                                        )}
                                       </p>
                                       <p className="text-[11px] text-slate-500 break-words">{c.translation}</p>
                                     </div>
@@ -3365,7 +3636,9 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
                             })}
                           </div>
                           <p className="text-[9px] text-slate-400 leading-snug">
-                            Touchez une expression pour l'ajouter à votre base — vous l'apprendrez en contexte.
+                            {shownDraft?.state === 'pending'
+                              ? "Touchez une expression pour n'ajouter qu'elle — le mot seul ne sera pas enregistré."
+                              : "Touchez une expression pour l'ajouter à votre base — vous l'apprendrez en contexte."}
                           </p>
                         </>
                       ) : isLoadingCollocations ? (
@@ -3382,14 +3655,14 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
 
                     <div className="pt-2 flex items-center justify-between border-t border-indigo-100">
                       <span className={`text-[10px] uppercase font-bold tracking-tighter px-2 py-0.5 rounded ${
-                        searchResult.status === 'mastered' ? 'bg-emerald-100 text-emerald-600' :
-                        searchResult.status === 'learning' ? 'bg-amber-100 text-amber-600' : 'bg-slate-100 text-slate-500'
+                        shownResult.status === 'mastered' ? 'bg-emerald-100 text-emerald-600' :
+                        shownResult.status === 'learning' ? 'bg-amber-100 text-amber-600' : 'bg-slate-100 text-slate-500'
                       }`}>
-                        {searchResult.status === 'mastered' ? 'Appris' :
-                         searchResult.status === 'learning' ? 'En cours' : 'Nouveau'}
+                        {shownResult.status === 'mastered' ? 'Appris' :
+                         shownResult.status === 'learning' ? 'En cours' : 'Nouveau'}
                       </span>
                       <span className="text-[10px] text-slate-400 uppercase font-bold tracking-tighter">
-                        Révisions: {searchResult.review_count}
+                        Révisions: {shownResult.review_count}
                       </span>
                     </div>
 
@@ -4173,7 +4446,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown, une entrée par numéro :
                     }));
                     setCurrentExerciseBatch(prev => prev.filter(w => w.id !== idToRemove));
 
-                    if (searchResult && searchResult.id === idToRemove) {
+                    if (shownResult && shownResult.id === idToRemove) {
                       setSearchQuery('');
                     }
 

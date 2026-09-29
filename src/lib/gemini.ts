@@ -10,15 +10,18 @@ export class GeminiUnavailableError extends Error {
   }
 }
 
-export async function generateContent(params: Record<string, unknown>): Promise<any> {
+export async function generateContent(params: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
   let res: Response;
   try {
     res = await fetch("/api/gemini", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(params),
+      signal,
     });
-  } catch {
+  } catch (err) {
+    // Запрос отменили сами (другая модель ответила раньше) — это не сбой сети.
+    if (signal?.aborted) throw err;
     // Сеть недоступна — до сервера не дошли вовсе.
     throw new GeminiUnavailableError();
   }

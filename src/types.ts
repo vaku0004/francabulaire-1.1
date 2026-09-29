@@ -18,12 +18,19 @@ export interface Word {
   first_reviewed_at?: number;
   last_grade?: ReviewGrade;
   /** Common phrases built around this word, cached so they load once and show instantly. */
-  collocations?: { phrase: string; translation: string }[];
+  collocations?: Collocation[];
   /** CEFR difficulty of the word/phrase, A1 (easiest) → C2. Drives the order new cards are introduced. */
   cefr?: CefrLevel;
 }
 
 export type CefrLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
+
+export interface Collocation {
+  phrase: string;
+  translation: string;
+  /** Level of the phrase itself — often higher than the bare word's. */
+  cefr?: CefrLevel;
+}
 export const CEFR_LEVELS: CefrLevel[] = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
 
 export type ReviewGrade = 'remembered' | 'almost' | 'forgotten';
