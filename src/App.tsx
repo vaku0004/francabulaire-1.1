@@ -85,6 +85,15 @@ const FAST_MODELS = [
   "gemma-4-26b-a4b-it",
 ];
 
+// Suggested phrases get saved and memorized, so grammar beats speed here. On the hardest
+// test word ("pourrais") Gemma 26B made 0 errors in 4 phrases, 3.5 Flash Lite made 3
+// ("on pourrais", "si je pourrais"...). Loaded separately, after the translation shows.
+const PHRASE_MODELS = [
+  "gemma-4-26b-a4b-it",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+];
+
 // CEFR helpers — levels come from the AI, so anything outside A1..C2 is treated as unknown
 function toCefr(v: unknown): CefrLevel | undefined {
   const s = String(v ?? '').trim().toUpperCase();
@@ -199,6 +208,8 @@ interface GenerateOptions {
   hedgeAfterMs?: number;
   /** Short lookup: use FAST_MODELS and skip hidden reasoning, which only adds latency. */
   fast?: boolean;
+  /** Override the model order (still honours `fast` for reasoning settings). */
+  models?: string[];
 }
 
 // How to switch reasoning off, per model — each family takes a different setting and
@@ -218,7 +229,7 @@ const NO_THINKING: Record<string, object> = {
  */
 function generateWithFallback(params: any, opts: GenerateOptions = {}): Promise<any> {
   const hedgeAfterMs = opts.hedgeAfterMs ?? 15000;
-  const models = opts.fast ? FAST_MODELS : FALLBACK_MODELS;
+  const models = opts.models ?? (opts.fast ? FAST_MODELS : FALLBACK_MODELS);
 
   const attempt = async (model: string, signal: AbortSignal) => {
     const thinkingConfig = opts.fast ? NO_THINKING[model] : undefined;
@@ -1994,8 +2005,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
         ? `The user typed "${query.trim()}" in ${currentLangObj.aiName} (Cyrillic script).
 Translate this ${currentLangObj.aiName} word or phrase into French.
 Return ONLY a raw JSON object, no markdown, no extra text:
-{"frenchWord":"the French translation","translation":"${query.trim()}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence using the word","exampleTranslation":"translation of example in ${currentLangObj.aiName}","found":true,"suggestions":[],"collocations":[{"phrase":"common 2-5 word French expression with frenchWord","translation":"its meaning in ${currentLangObj.aiName}","cefr":"B1"}],"cefr":"A1|A2|B1|B2|C1|C2 — level of the French word"}
-Give 4 collocations; each has its own CEFR level (judge the whole expression). Each must be grammatically correct French a native would actually use (never "si" + conditional).`
+{"frenchWord":"the French translation","translation":"${query.trim()}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence using the word","exampleTranslation":"translation of example in ${currentLangObj.aiName}","found":true,"suggestions":[],"cefr":"A1|A2|B1|B2|C1|C2 — level of the French word"}`
         : `Translate the word or phrase "${trimmedQuery}" between French and ${currentLangObj.aiName}.
 If it's French, translate to ${currentLangObj.aiName}. If it's ${currentLangObj.aiName}, translate to French.
 
@@ -2008,13 +2018,6 @@ Part of speech:
 - Always fill "infinitiveTranslation" too when "infinitive" is set.
 - If "frenchWord" is NOT a verb, leave "infinitive" and "infinitiveTranslation" empty.
 
-Collocations — the most valuable part for the learner:
-- Fill "collocations" with 4 SHORT, genuinely common French expressions built around "frenchWord" (2-5 words each).
-- Prefer what a native actually says: fixed expressions, verb+noun pairs, common prepositions.
-- Each item: {"phrase": "the French collocation", "translation": "its meaning in ${currentLangObj.aiName}", "cefr": "CEFR level of the WHOLE expression (A1..C2) — often higher than the bare word"}.
-- Keep "frenchWord" (or its inflected form) inside every phrase. No full sentences, no punctuation at the end.
-- Every phrase must be correct French that a native would actually write. Check the grammar: never "si" + conditional ("si je pouvais", not "si je pourrais"), correct inversion ("pourriez-vous", not "pourrais vous"), no contradictory or empty combinations ("pas encore déjà").
-
 CEFR level:
 - Set "cefr" to the CEFR level (A1, A2, B1, B2, C1 or C2) at which a French learner typically meets this word or phrase.
 - Judge the French side, by frequency and difficulty: everyday basics = A1/A2, abstract or formal = B2+, rare/literary/idiomatic = C1/C2.
@@ -2022,7 +2025,7 @@ CEFR level:
 Capitalization and accents NEVER make a word "not found": "etre", "Ecole", "francais", "deja", "a cote" are the same as "être", "école", "français", "déjà", "à côté". Silently restore the correct spelling (accents, lowercase unless it is a proper noun) in "frenchWord" and set found:true.
 Only a real misspelling (wrong, missing or extra letters) of a French word gets found:false with 2-3 correct French spelling suggestions in "suggestions".
 If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra text:
-{"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[],"collocations":[{"phrase":"...","translation":"...","cefr":"B1"}],"cefr":"B1"}`;
+{"frenchWord":"...","translation":"complete accurate translation in ${currentLangObj.aiName}","gender":"m/f/none","isPlural":false,"infinitive":"","infinitiveTranslation":"","example":"short French sentence","exampleTranslation":"translation in ${currentLangObj.aiName}","found":true,"suggestions":[],"cefr":"B1"}`;
 
       const response = await generateWithFallback({
         contents: prompt,
@@ -2039,12 +2042,7 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
 
       if (result.found && result.frenchWord && result.translation) {
         const finalWord = result.frenchWord;
-        const normalizedFinal = normalizeWord(finalWord);
 
-        // Collocations come free with the same call — cached on the word so they show instantly next time
-        const freshCollocations = parseCollocations(result.collocations)
-          .filter(c => normalizeWord(c.phrase) !== normalizedFinal)
-          .slice(0, 6);
 
         const newWord: Word = {
           id: crypto.randomUUID(),
@@ -2062,7 +2060,6 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
           next_review_at: Date.now() + NEW_WORD_FIRST_DELAY, // learning step: first review in ~10 min
           status: 'new',
           review_count: 0,
-          collocations: freshCollocations.length > 0 ? freshCollocations : undefined,
           cefr: toCefr(result.cefr)
         };
 
@@ -2087,7 +2084,6 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
               infinitiveTranslation: result.infinitiveTranslation || updated[existingIdx].infinitiveTranslation,
               example: result.example || updated[existingIdx].example,
               exampleTranslation: result.exampleTranslation || updated[existingIdx].exampleTranslation,
-              collocations: freshCollocations.length > 0 ? freshCollocations : updated[existingIdx].collocations,
               cefr: toCefr(result.cefr) ?? updated[existingIdx].cefr,
             };
             return updated;
@@ -2135,7 +2131,8 @@ If valid, translate it. Output ONLY a raw JSON object, no markdown, no extra tex
   }, [searchQuery, shownResult, fetchTranslation]);
 
   // Load (or extend) the list of collocations for the word currently shown in the dictionary
-  const fetchCollocations = async (word: Word) => {
+  // `silent`: started automatically after a lookup — a failure just leaves the retry button
+  const fetchCollocations = async (word: Word, silent = false) => {
     if (isLoadingCollocations) return;
     setIsLoadingCollocations(true);
     try {
@@ -2155,7 +2152,7 @@ ${already.length > 0 ? `- N'utilise AUCUNE de ces expressions déjà proposées 
 Réponds UNIQUEMENT avec un JSON brut, sans markdown :
 {"collocations":[{"phrase":"...","translation":"sens en ${currentLangObj.aiName}","cefr":"B1"}]}`,
         config: {}
-      }, { fast: true, hedgeAfterMs: 4000 });
+      }, { fast: true, models: PHRASE_MODELS, hedgeAfterMs: 7000 });
       const result = JSON.parse(extractJson(response) || '{}');
       if (!Array.isArray(result.collocations)) throw new Error('bad response');
       const seen = new Set([normalizeWord(word.word), ...already.map(p => normalizeWord(p))]);
@@ -2171,7 +2168,7 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
       patchWord(word.id, w => ({ ...w, collocations: [...(w.collocations ?? []), ...fresh] }));
     } catch (e) {
       console.error('Collocations error:', e);
-      alert(describeGeminiError(e, "Impossible de charger les expressions. Réessayez."));
+      if (!silent) alert(describeGeminiError(e, "Impossible de charger les expressions. Réessayez."));
     } finally {
       setIsLoadingCollocations(false);
     }
@@ -2380,16 +2377,18 @@ Réponds UNIQUEMENT avec un JSON brut, sans markdown :
     removeWordsById(new Set(drop.map(w => w.id)));
   };
 
-  // Words already in the base never trigger a translation call, so they would show no phrases
-  // until the learner clicked. Fetch them once, automatically, the first time the word is displayed.
+  // Phrases come from their own call (PHRASE_MODELS), started as soon as a word is shown —
+  // the translation doesn't wait for them. Once per word; the button retries.
   const autoCollocationTried = React.useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!shownResult || isSearching || isLoadingCollocations) return;
     if (shownResult.collocations && shownResult.collocations.length > 0) return;
     if (autoCollocationTried.current.has(shownResult.id)) return;
     autoCollocationTried.current.add(shownResult.id);
-    fetchCollocations(shownResult);
-  }, [shownResult, isSearching]);
+    fetchCollocations(shownResult, true);
+    // isLoadingCollocations: a word looked up while the previous one's phrases were loading
+    // must still get its own once that load ends
+  }, [shownResult, isSearching, isLoadingCollocations]);
 
   // Save a collocation as its own entry — this is the "learn in context" path:
   // the phrase enters the base, not just the bare word
