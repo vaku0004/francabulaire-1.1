@@ -13,6 +13,12 @@ const ALLOWED_MODELS = new Set([
   "gemini-3.5-flash",
   "gemini-3.7-flash",
   "gemma-4-26b-a4b-it",
+  // Temporary: candidates under measurement
+  "gemini-3.6-flash",
+  "gemini-3.8-flash",
+  "gemini-3-flash",
+  "gemini-3-flash-preview",
+  "gemma-4-31b-it",
 ]);
 
 const DEFAULT_ORIGINS = [
