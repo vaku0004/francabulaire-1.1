@@ -9,6 +9,7 @@ import { GoogleGenAI } from "@google/genai";
 // запрос к прокси мог бы жечь квоту на произвольной дорогой модели.
 const ALLOWED_MODELS = new Set([
   "gemini-3.1-flash-lite",
+  "gemini-3.5-flash-lite",
   "gemini-3.5-flash",
   "gemini-3.7-flash",
   "gemma-4-26b-a4b-it",
